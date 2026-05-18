@@ -1,0 +1,38 @@
+{
+  "name": "@bananapus/referral-split-hook-v6",
+  "version": "0.0.1",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Bananapus/nana-referral-split-hook-v6"
+  },
+  "files": [
+    "CHANGELOG.md",
+    "foundry.lock",
+    "foundry.toml",
+    "references/",
+    "remappings.txt",
+    "script/",
+    "src/"
+  ],
+  "engines": {
+    "node": ">=20.0.0"
+  },
+  "scripts": {
+    "test": "forge test",
+    "test:fork": "forge test --fork-url $RPC_ETHEREUM_MAINNET",
+    "coverage": "forge coverage --match-path \"./src/*.sol\" --report lcov --report summary",
+    "deploy:mainnets": "source ./.env && npx sphinx propose ./script/Deploy.s.sol --networks mainnets",
+    "deploy:testnets": "source ./.env && npx sphinx propose ./script/Deploy.s.sol --networks testnets"
+  },
+  "dependencies": {
+    "@bananapus/core-v6": "^0.0.54",
+    "@bananapus/distributor-v6": "^0.0.18",
+    "@bananapus/permission-ids-v6": "^0.0.25",
+    "@openzeppelin/contracts": "5.6.1",
+    "@prb/math": "4.1.1"
+  },
+  "devDependencies": {
+    "@sphinx-labs/plugins": "0.33.3"
+  }
+}

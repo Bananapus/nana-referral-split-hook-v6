@@ -1,0 +1,39 @@
+node_modules
+.env
+*.txt
+!remappings.txt
+
+# Foundry
+out
+
+# Hardhat files
+cache
+artifacts
+deployments/localhost/**
+
+# Mac OSX
+.DS_Store
+
+# Code coverage reports
+coverage/
+coverage.json
+lcov.info
+
+# VSCode
+workspace.code-workspace
+.vscode/
+
+backup/
+.secret
+
+publish.sh
+.claude/
+
+# Audit artifacts
+.audit/
+.audit-logs/
+.audit-prep/
+AUDIT_FINDINGS.md
+NEMESIS_SCOPE.md
+.security-worktrees/
+assets/

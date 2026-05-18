@@ -1,0 +1,23 @@
+[profile.default]
+solc = '0.8.28'
+bytecode_hash = "none"
+evm_version = 'cancun'
+optimizer_runs = 200
+libs = ["node_modules", "lib"]
+fs_permissions = [{ access = "read-write", path = "./"}]
+
+[fuzz]
+runs = 4096
+
+[invariant]
+runs = 1024
+depth = 100
+fail_on_revert = false
+
+[fmt]
+number_underscore = "thousands"
+multiline_func_header = "all"
+wrap_comments = true
+
+[rpc_endpoints]
+ethereum = "${RPC_ETHEREUM_MAINNET}"
