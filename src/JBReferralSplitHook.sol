@@ -19,8 +19,12 @@ import {IJBReferralSplitHook} from "./interfaces/IJBReferralSplitHook.sol";
 
 /// @notice A split hook on the fee project's reserved-token group that pools incoming fee-project tokens and
 /// forwards each referring project's pro-rata share into a configured `IJBDistributor`.
-/// @dev The volume ratio comes from `JBTerminalStore.feeVolumeByReferralOf` / `totalFeeVolumeOf` keyed by the
-/// configured `TERMINAL`. The vesting + claim mechanics live downstream in the distributor.
+/// @dev Referrers are identified by the `(referralChainId, referralProjectId)` pair recorded in
+/// `JBTerminalStore.feeVolumeByReferralOf`. Same-chain referrers get pushed to the local distributor directly.
+/// Cross-chain referrers' credits stay parked in this hook until cross-chain settlement is wired up — the on-chain
+/// accounting is correct in both cases. The volume ratio comes from
+/// `JBTerminalStore.feeVolumeByReferralOf(TERMINAL, chainId, projectId) / totalFeeVolumeOf(TERMINAL)`. The vesting +
+/// claim mechanics live downstream in the distributor.
 contract JBReferralSplitHook is ERC165, IJBReferralSplitHook {
     using SafeERC20 for IERC20;
 
@@ -54,7 +58,9 @@ contract JBReferralSplitHook is ERC165, IJBReferralSplitHook {
     uint256 public override totalDeposited;
 
     /// @inheritdoc IJBReferralSplitHook
-    mapping(uint256 referralProjectId => uint256) public override pushedOf;
+    /// @dev Nested by `referralChainId` then `referralProjectId` so the high-water mark is unique per
+    /// cross-chain pair. The same `projectId` on two different chains tracks two independent push budgets.
+    mapping(uint256 referralChainId => mapping(uint256 referralProjectId => uint256)) public override pushedOf;
 
     //*********************************************************************//
     // -------------------------- constructor ---------------------------- //
@@ -115,35 +121,46 @@ contract JBReferralSplitHook is ERC165, IJBReferralSplitHook {
     }
 
     /// @inheritdoc IJBReferralSplitHook
-    function pushTo(uint256 referralProjectId) external override returns (uint256 pushed) {
+    function pushTo(uint256 referralChainId, uint256 referralProjectId) external override returns (uint256 pushed) {
+        // Reject the two sentinel/self-reference cases on the projectId axis. Chain ID can be anything (including
+        // the current chain or a remote chain).
         if (referralProjectId == 0 || referralProjectId == FEE_PROJECT_ID) {
             revert JBReferralSplitHook_InvalidReferralProjectId();
         }
 
-        uint256 totalVol = STORE.totalFeeVolumeOf(TERMINAL);
-        if (totalVol == 0) {
-            emit Skipped({referralProjectId: referralProjectId, reason: "no volume"});
+        // Cross-chain referrers: the credit is recorded correctly in the store, but the local distributor and the
+        // local fee-project token can't natively settle to a project that lives on a different chain. Skip and
+        // leave the credit parked in this hook — a future settlement path (e.g. a sucker that bridges the
+        // fee-project token to the referrer's home chain) can drain it.
+        if (referralChainId != block.chainid) {
+            emit Skipped({referralChainId: referralChainId, referralProjectId: referralProjectId, reason: "remote"});
             return 0;
         }
 
-        uint256 refVol = STORE.feeVolumeByReferralOf(TERMINAL, referralProjectId);
+        uint256 totalVol = STORE.totalFeeVolumeOf(TERMINAL);
+        if (totalVol == 0) {
+            emit Skipped({referralChainId: referralChainId, referralProjectId: referralProjectId, reason: "no volume"});
+            return 0;
+        }
+
+        uint256 refVol = STORE.feeVolumeByReferralOf(TERMINAL, referralChainId, referralProjectId);
         if (refVol == 0) {
-            emit Skipped({referralProjectId: referralProjectId, reason: "no volume"});
+            emit Skipped({referralChainId: referralChainId, referralProjectId: referralProjectId, reason: "no volume"});
             return 0;
         }
 
         uint256 entitled = mulDiv(totalDeposited, refVol, totalVol);
-        uint256 alreadyPushed = pushedOf[referralProjectId];
+        uint256 alreadyPushed = pushedOf[referralChainId][referralProjectId];
         if (entitled <= alreadyPushed) {
-            emit Skipped({referralProjectId: referralProjectId, reason: "caught up"});
+            emit Skipped({referralChainId: referralChainId, referralProjectId: referralProjectId, reason: "caught up"});
             return 0;
         }
 
-        // Resolve the referring project's IVotes token. Credit-only projects (no ERC-20) cannot receive a push —
-        // their share stays pending in this hook until they tokenize.
+        // Resolve the referring project's IVotes token on this chain. Credit-only projects (no ERC-20) cannot
+        // receive a push — their share stays pending in this hook until they tokenize.
         IJBToken refToken = TOKENS.tokenOf(referralProjectId);
         if (address(refToken) == address(0)) {
-            emit Skipped({referralProjectId: referralProjectId, reason: "no token"});
+            emit Skipped({referralChainId: referralChainId, referralProjectId: referralProjectId, reason: "no token"});
             return 0;
         }
 
@@ -154,13 +171,18 @@ contract JBReferralSplitHook is ERC165, IJBReferralSplitHook {
         // Update the high-water mark BEFORE the external call. Reentrancy via the distributor or the fee-project
         // token cannot increase `pushed` because both `totalDeposited` and `feeVolumeByReferralOf` are monotonic;
         // re-entering would just compute a smaller delta and revert at the SafeERC20 layer if it tried to over-pull.
-        pushedOf[referralProjectId] = entitled;
+        pushedOf[referralChainId][referralProjectId] = entitled;
 
         IJBToken feeToken = TOKENS.tokenOf(FEE_PROJECT_ID);
         IERC20(address(feeToken)).forceApprove({spender: address(DISTRIBUTOR), value: pushed});
         DISTRIBUTOR.fund({hook: address(refToken), token: IERC20(address(feeToken)), amount: pushed});
 
-        emit Push({referralProjectId: referralProjectId, referralToken: address(refToken), amount: pushed});
+        emit Push({
+            referralChainId: referralChainId,
+            referralProjectId: referralProjectId,
+            referralToken: address(refToken),
+            amount: pushed
+        });
     }
 
     //*********************************************************************//

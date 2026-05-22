@@ -10,6 +10,11 @@ import {IJBDistributor} from "@bananapus/distributor-v6/src/interfaces/IJBDistri
 /// @notice A split hook that pools the fee project's reserved-token allocation and forwards each referring project's
 /// pro-rata share to an `IJBDistributor` (typically `JBTokenDistributor`) so the referring project's IVotes holders
 /// can claim it.
+/// @dev Referrers are identified by the `(referralChainId, referralProjectId)` pair recorded in
+/// `JBTerminalStore.feeVolumeByReferralOf`. Same-chain referrers (`referralChainId == block.chainid`) get pushed
+/// to the local distributor directly. Cross-chain referrers' credits stay parked in this hook until a settlement
+/// mechanism (e.g. a sucker bridge of the fee-project token) is built — the on-chain accounting is correct in
+/// both cases.
 /// @dev See `ARCHITECTURE.md` for the system context and `RISKS.md` for the late-entrant skew of the high-water-mark
 /// pro-rata math.
 interface IJBReferralSplitHook is IJBSplitHook {
@@ -22,16 +27,23 @@ interface IJBReferralSplitHook is IJBSplitHook {
     /// @param newTotalDeposited The new value of `totalDeposited` after this deposit.
     event Deposit(uint256 amount, uint256 newTotalDeposited);
 
-    /// @notice Emitted when a referring project's accrued share is forwarded to the distributor.
+    /// @notice Emitted when a same-chain referring project's accrued share is forwarded to the distributor.
+    /// @param referralChainId The referrer's home chain ID (always `block.chainid` for this event).
     /// @param referralProjectId The referring project credited.
     /// @param referralToken The referring project's IVotes token (the distributor `hook` key).
     /// @param amount The number of fee-project tokens forwarded.
-    event Push(uint256 indexed referralProjectId, address indexed referralToken, uint256 amount);
+    event Push(
+        uint256 indexed referralChainId,
+        uint256 indexed referralProjectId,
+        address indexed referralToken,
+        uint256 amount
+    );
 
     /// @notice Emitted when `pushTo` no-ops for an observable reason.
+    /// @param referralChainId The referrer's home chain ID.
     /// @param referralProjectId The referring project whose push was skipped.
-    /// @param reason A short, indexed code (e.g. `"no token"`, `"no volume"`, `"caught up"`).
-    event Skipped(uint256 indexed referralProjectId, bytes32 reason);
+    /// @param reason A short, indexed code (e.g. `"no token"`, `"no volume"`, `"caught up"`, `"remote"`).
+    event Skipped(uint256 indexed referralChainId, uint256 indexed referralProjectId, bytes32 reason);
 
     //*********************************************************************//
     // ------------------------------ errors ------------------------------ //
@@ -67,21 +79,30 @@ interface IJBReferralSplitHook is IJBSplitHook {
     /// @notice Cumulative fee-project tokens received by this hook via `processSplitWith`.
     function totalDeposited() external view returns (uint256);
 
-    /// @notice High-water mark of fee-project tokens forwarded to the distributor for a given referrer.
-    /// @param referralProjectId The referring project.
-    /// @return The cumulative amount pushed.
-    function pushedOf(uint256 referralProjectId) external view returns (uint256);
+    /// @notice High-water mark of fee-project tokens forwarded to the distributor for a given
+    /// `(referralChainId, referralProjectId)` pair. Same-chain pairs accumulate via `pushTo`; cross-chain pairs
+    /// stay at `0` until cross-chain settlement is built.
+    /// @param referralChainId The referrer's home chain ID.
+    /// @param referralProjectId The referring project on that chain.
+    /// @return The cumulative amount pushed for this pair.
+    function pushedOf(uint256 referralChainId, uint256 referralProjectId) external view returns (uint256);
 
     //*********************************************************************//
     // -------------------------- external txs ---------------------------- //
     //*********************************************************************//
 
-    /// @notice Forward this referrer's accrued pro-rata share to the distributor.
+    /// @notice Forward a same-chain referrer's accrued pro-rata share to the distributor.
     /// @dev Permissionless. Computes `entitled = mulDiv(totalDeposited, refVolume, totalFeeVolume)` and pushes
-    /// `entitled - pushedOf[referralProjectId]` (clamped at 0). Reverts on `referralProjectId in {0, FEE_PROJECT_ID}`.
-    /// No-ops (without revert) when the referrer has no `IJBToken`, no recorded volume, or has already been pushed
-    /// at or above its current entitled level.
-    /// @param referralProjectId The referring project whose share to forward.
-    /// @return pushed The number of tokens forwarded in this call (0 on no-op).
-    function pushTo(uint256 referralProjectId) external returns (uint256 pushed);
+    /// `entitled - pushedOf[referralChainId][referralProjectId]` (clamped at 0). Reverts when
+    /// `referralProjectId in {0, FEE_PROJECT_ID}`.
+    /// @dev Skips (without reverting) when:
+    ///   - the referrer has no `IJBToken` on the current chain ("no token");
+    ///   - the referrer has no recorded volume ("no volume");
+    ///   - the referrer has already been pushed at or above its current entitled level ("caught up");
+    ///   - `referralChainId != block.chainid` ("remote") — the credit stays parked in this hook for a future
+    ///     cross-chain settlement path.
+    /// @param referralChainId The referrer's home EIP-155 chain ID. Must equal `block.chainid` to push locally.
+    /// @param referralProjectId The referring project on that chain.
+    /// @return pushed The number of tokens forwarded in this call (0 on skip).
+    function pushTo(uint256 referralChainId, uint256 referralProjectId) external returns (uint256 pushed);
 }

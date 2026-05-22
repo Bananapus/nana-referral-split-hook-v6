@@ -12,8 +12,9 @@ import {IJBDistributor} from "@bananapus/distributor-v6/src/interfaces/IJBDistri
 import {JBReferralSplitHook} from "../src/JBReferralSplitHook.sol";
 import {IJBReferralSplitHook} from "../src/interfaces/IJBReferralSplitHook.sol";
 
-/// @notice Smoke tests for `JBReferralSplitHook`. Full unit + integration coverage will follow once a full
-/// `nana-core-v6` v0.0.55 (with `totalFeeVolumeOf`, packed `JBFee`, and `recordPaymentFrom` auto-credit) ships.
+/// @notice Smoke tests for `JBReferralSplitHook`. Full unit + integration coverage will follow once
+/// `nana-core-v6` 0.0.59 (with the nested `feeVolumeByReferralOf(terminal, chainId, projectId)` mapping and the
+/// auto-resolved `(chainId, projectId)` encoding) is published.
 contract JBReferralSplitHookTest is Test {
     JBReferralSplitHook internal hook;
 
@@ -53,17 +54,25 @@ contract JBReferralSplitHookTest is Test {
 
     function test_pushTo_revertsOnZeroReferralProjectId() public {
         vm.expectRevert(IJBReferralSplitHook.JBReferralSplitHook_InvalidReferralProjectId.selector);
-        hook.pushTo(0);
+        hook.pushTo({referralChainId: block.chainid, referralProjectId: 0});
     }
 
     function test_pushTo_revertsOnFeeProjectIdSelfReference() public {
         vm.expectRevert(IJBReferralSplitHook.JBReferralSplitHook_InvalidReferralProjectId.selector);
-        hook.pushTo(FEE_PROJECT_ID);
+        hook.pushTo({referralChainId: block.chainid, referralProjectId: FEE_PROJECT_ID});
+    }
+
+    function test_pushTo_skipsRemoteChainCredit() public {
+        // A referrer on a different chain — credit is accumulated in the store but the local hook cannot settle
+        // cross-chain, so it skips and emits a "remote" reason. `pushedOf` stays at 0.
+        uint256 remoteChainId = block.chainid + 1;
+        assertEq(hook.pushTo({referralChainId: remoteChainId, referralProjectId: 42}), 0);
+        assertEq(hook.pushedOf({referralChainId: remoteChainId, referralProjectId: 42}), 0);
     }
 
     function test_pushTo_noopsWhenTotalVolumeIsZero() public {
         vm.mockCall(store, abi.encodeCall(IJBTerminalStore.totalFeeVolumeOf, (terminal)), abi.encode(uint256(0)));
-        assertEq(hook.pushTo(42), 0);
-        assertEq(hook.pushedOf(42), 0);
+        assertEq(hook.pushTo({referralChainId: block.chainid, referralProjectId: 42}), 0);
+        assertEq(hook.pushedOf({referralChainId: block.chainid, referralProjectId: 42}), 0);
     }
 }
