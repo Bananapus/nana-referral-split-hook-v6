@@ -16,9 +16,9 @@ import {JBLeaf} from "@bananapus/suckers-v6/src/structs/JBLeaf.sol";
 import {JBReferralSplitHook} from "../src/JBReferralSplitHook.sol";
 import {IJBReferralSplitHook} from "../src/interfaces/IJBReferralSplitHook.sol";
 
-/// @notice Smoke tests for `JBReferralSplitHook`. Full unit + integration coverage layers on once
-/// `@bananapus/core-v6` 0.0.59 and `@bananapus/suckers-v6` 0.0.50 (with the nested
-/// `feeVolumeByReferralOf(terminal, chainId, projectId)` mapping and the `bytes32 metadata` leaf field) are published.
+/// @notice Smoke tests for `JBReferralSplitHook`. Exercises construction, immutables, and the pure
+/// `packLeafMetadata` encoding. Deeper integration coverage (mocked `feeVolumeByReferralOf`,
+/// sucker bridge round-trips, distributor pushes) layers on in subsequent test files.
 contract JBReferralSplitHookTest is Test {
     JBReferralSplitHook internal hook;
 
@@ -161,7 +161,7 @@ contract JBReferralSplitHookTest is Test {
         hook.claimAndPush({originChainId: 1, referralProjectId: 42, sucker: sucker, claimData: claimData});
     }
 
-    function test_claimAndPush_revertsOnDataMismatch() public {
+    function test_claimAndPush_revertsOnMetadataMismatch() public {
         IJBSucker sucker = IJBSucker(makeAddr("sucker"));
         vm.mockCall(
             suckerRegistry,
@@ -170,8 +170,8 @@ contract JBReferralSplitHookTest is Test {
         );
 
         bytes32[32] memory proof;
-        // Caller claims this leaf is for projectId 99 — but the leaf's data was packed for projectId 42.
-        bytes32 honestMetadata = hook.packLeafMetadata({originChainId: 1, referralProjectId: 42});
+        // Caller claims this leaf is for projectId 99 — but the leaf's metadata was packed for projectId 42.
+        bytes32 honestMetadata = hook.packLeafMetadata({originChainId: 7, referralProjectId: 42});
         JBClaim memory claimData = JBClaim({
             token: makeAddr("terminalToken"),
             leaf: JBLeaf({
@@ -184,13 +184,63 @@ contract JBReferralSplitHookTest is Test {
             proof: proof
         });
 
-        bytes32 lyingMetadata = hook.packLeafMetadata({originChainId: 1, referralProjectId: 99});
+        bytes32 lyingMetadata = hook.packLeafMetadata({originChainId: 7, referralProjectId: 99});
         vm.expectRevert(
             abi.encodeWithSelector(
-                IJBReferralSplitHook.JBReferralSplitHook_LeafBeneficiaryMismatch.selector, lyingMetadata, honestMetadata
+                IJBReferralSplitHook.JBReferralSplitHook_LeafMetadataMismatch.selector, lyingMetadata, honestMetadata
             )
         );
-        hook.claimAndPush({originChainId: 1, referralProjectId: 99, sucker: sucker, claimData: claimData});
+        hook.claimAndPush({originChainId: 7, referralProjectId: 99, sucker: sucker, claimData: claimData});
+    }
+
+    function test_claimAndPush_revertsOnLocalOrigin() public {
+        // `claimAndPush` is exclusively for cross-chain settlement — a leaf "originating" from `block.chainid`
+        // would let a caller bypass the same-chain `pushTo` high-water-mark math by hand-crafting a leaf and
+        // running it through this path. Block it up front.
+        IJBSucker sucker = IJBSucker(makeAddr("sucker"));
+        bytes32[32] memory proof;
+        JBClaim memory claimData = JBClaim({
+            token: makeAddr("terminalToken"),
+            leaf: JBLeaf({
+                index: 0,
+                beneficiary: bytes32(uint256(uint160(address(hook)))),
+                projectTokenCount: 1 ether,
+                terminalTokenAmount: 1 ether,
+                metadata: hook.packLeafMetadata({originChainId: block.chainid, referralProjectId: 42})
+            }),
+            proof: proof
+        });
+
+        vm.expectRevert(
+            abi.encodeWithSelector(IJBReferralSplitHook.JBReferralSplitHook_OriginIsLocal.selector, block.chainid)
+        );
+        hook.claimAndPush({originChainId: block.chainid, referralProjectId: 42, sucker: sucker, claimData: claimData});
+    }
+
+    function test_bridgeRemote_revertsOnSuckerPeerMismatch() public {
+        // Registered sucker that bridges to chain 999, but caller asks to credit a referrer on chain 7 —
+        // routing the credit through this sucker would land it on the wrong omnichain leg.
+        uint256 referrerChain = 7;
+        uint256 suckerPeerChain = 999;
+        IJBSucker sucker = IJBSucker(makeAddr("misroutedSucker"));
+        vm.mockCall(
+            suckerRegistry,
+            abi.encodeCall(IJBSuckerRegistry.isSuckerOf, (FEE_PROJECT_ID, address(sucker))),
+            abi.encode(true)
+        );
+        vm.mockCall(address(sucker), abi.encodeCall(IJBSucker.peerChainId, ()), abi.encode(suckerPeerChain));
+
+        vm.expectRevert(
+            abi.encodeWithSelector(
+                IJBReferralSplitHook.JBReferralSplitHook_SuckerPeerMismatch.selector, referrerChain, suckerPeerChain
+            )
+        );
+        hook.bridgeRemote({
+            referralChainId: referrerChain,
+            referralProjectId: 42,
+            sucker: sucker,
+            terminalToken: makeAddr("terminalToken")
+        });
     }
 
     function test_packLeafMetadata_roundTrips() public view {
@@ -203,5 +253,23 @@ contract JBReferralSplitHookTest is Test {
         assertEq(raw & type(uint64).max, referralProjectId, "projectId in lower 64 bits");
         assertEq((raw >> 64) & type(uint32).max, originChainId, "chainId in bits [95:64]");
         assertEq(raw >> 96, 0, "upper 160 bits reserved (zero)");
+    }
+
+    function test_packLeafMetadata_revertsOnChainIdOverflow() public {
+        uint256 oversized = uint256(type(uint32).max) + 1;
+        vm.expectRevert(
+            abi.encodeWithSelector(IJBReferralSplitHook.JBReferralSplitHook_ChainIdTooLarge.selector, oversized)
+        );
+        hook.packLeafMetadata({originChainId: oversized, referralProjectId: 1});
+    }
+
+    function test_packLeafMetadata_revertsOnProjectIdOverflow() public {
+        uint256 oversized = uint256(type(uint64).max) + 1;
+        vm.expectRevert(
+            abi.encodeWithSelector(
+                IJBReferralSplitHook.JBReferralSplitHook_ReferralProjectIdTooLarge.selector, oversized
+            )
+        );
+        hook.packLeafMetadata({originChainId: 1, referralProjectId: oversized});
     }
 }

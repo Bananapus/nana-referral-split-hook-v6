@@ -9,11 +9,9 @@ import {mulDiv} from "@prb/math/src/Common.sol";
 
 import {IJBDirectory} from "@bananapus/core-v6/src/interfaces/IJBDirectory.sol";
 import {IJBSplitHook} from "@bananapus/core-v6/src/interfaces/IJBSplitHook.sol";
-import {IJBTerminal} from "@bananapus/core-v6/src/interfaces/IJBTerminal.sol";
 import {IJBTerminalStore} from "@bananapus/core-v6/src/interfaces/IJBTerminalStore.sol";
 import {IJBToken} from "@bananapus/core-v6/src/interfaces/IJBToken.sol";
 import {IJBTokens} from "@bananapus/core-v6/src/interfaces/IJBTokens.sol";
-import {JBConstants} from "@bananapus/core-v6/src/libraries/JBConstants.sol";
 import {JBSplitHookContext} from "@bananapus/core-v6/src/structs/JBSplitHookContext.sol";
 import {IJBDistributor} from "@bananapus/distributor-v6/src/interfaces/IJBDistributor.sol";
 import {IJBSucker} from "@bananapus/suckers-v6/src/interfaces/IJBSucker.sol";
@@ -118,8 +116,17 @@ contract JBReferralSplitHook is ERC165, IJBReferralSplitHook {
         override
         returns (bytes32 metadata)
     {
-        // Pack into a single bytes32. Both fields are bounded by the encoding nana-core uses for the transient
-        // referral slot, so this representation is lossless for any value reachable through that pipeline.
+        // Enforce the documented field widths so an out-of-range value can never silently bleed into the other
+        // field. EIP-155 chain IDs comfortably fit in uint32 (the largest production chain in 2026 is well under
+        // 2^32); juicebox project IDs are sequential `uint256`s but in practice fit in uint48 with room to spare,
+        // so a uint64 cap here is forgiving and still catches accidents.
+        if (originChainId > type(uint32).max) revert JBReferralSplitHook_ChainIdTooLarge(originChainId);
+        if (referralProjectId > type(uint64).max) {
+            revert JBReferralSplitHook_ReferralProjectIdTooLarge(referralProjectId);
+        }
+
+        // Layout: bits [95:64] = originChainId (uint32), bits [63:0] = referralProjectId (uint64).
+        // Upper 160 bits remain zero, reserved for future extension.
         metadata = bytes32((originChainId << 64) | referralProjectId);
     }
 
@@ -220,6 +227,17 @@ contract JBReferralSplitHook is ERC165, IJBReferralSplitHook {
             revert JBReferralSplitHook_NotASucker({sucker: address(sucker)});
         }
 
+        // Registration alone says the sucker is *some* fee-project sucker — it doesn't say which chain it bridges
+        // to. Verify the sucker's peer is on `referralChainId`, otherwise a caller could route a referrer's
+        // credit through the wrong omnichain leg (e.g. credit owed to a project on Optimism gets bridged to Base
+        // and pushed to whatever local twin shares the bare projectId there).
+        uint256 actualPeerChainId = sucker.peerChainId();
+        if (actualPeerChainId != referralChainId) {
+            revert JBReferralSplitHook_SuckerPeerMismatch({
+                expectedPeerChainId: referralChainId, actualPeerChainId: actualPeerChainId
+            });
+        }
+
         uint256 deltaToProcess = _consumePendingFor(referralChainId, referralProjectId);
         if (deltaToProcess == 0) return 0;
 
@@ -271,6 +289,11 @@ contract JBReferralSplitHook is ERC165, IJBReferralSplitHook {
             revert JBReferralSplitHook_InvalidReferralProjectId();
         }
 
+        // A bridged claim must come from a *different* chain. Self-bridging is impossible (`bridgeRemote` already
+        // rejects it), but block it explicitly here so a caller can't construct a synthetic local-chain leaf and
+        // route it through this entrypoint to skip the same-chain `pushTo` high-water-mark accounting.
+        if (originChainId == block.chainid) revert JBReferralSplitHook_OriginIsLocal(block.chainid);
+
         // The sucker must be a registered sucker of the fee project — this is how we know the bridged tokens
         // came from a hook on a chain that's part of the same fee-project omnichain identity.
         if (!SUCKER_REGISTRY.isSuckerOf({projectId: FEE_PROJECT_ID, addr: address(sucker)})) {
@@ -287,64 +310,28 @@ contract JBReferralSplitHook is ERC165, IJBReferralSplitHook {
         }
 
         // The merkle proof inside `sucker.claim` will validate `claimData.leaf.metadata`; we enforce that the
-        // asserted `(originChainId, referralProjectId)` pair matches the leaf's data here so a caller can't
+        // asserted `(originChainId, referralProjectId)` pair matches the leaf's metadata here so a caller can't
         // substitute the projectId argument and redirect bridged tokens to a different local distributor.
         bytes32 expectedMetadata =
             packLeafMetadata({originChainId: originChainId, referralProjectId: referralProjectId});
         if (claimData.leaf.metadata != expectedMetadata) {
-            revert JBReferralSplitHook_LeafBeneficiaryMismatch({
-                expected: expectedMetadata, got: claimData.leaf.metadata
-            });
+            revert JBReferralSplitHook_LeafMetadataMismatch({expected: expectedMetadata, got: claimData.leaf.metadata});
         }
 
-        // Resolve the local fee project's primary terminal for the bridged terminal token. The sibling chain's
-        // omnichain fee project must accept this token; if it doesn't, there's no way for the hook to mint
-        // local fee-project tokens, so the claim must abort. Surface a typed error rather than a silent skip
-        // since the caller can fix the situation by waiting for the terminal to be registered.
-        IJBTerminal feeTerminal = DIRECTORY.primaryTerminalOf({projectId: FEE_PROJECT_ID, token: claimData.token});
-        if (address(feeTerminal) == address(0)) {
-            revert JBReferralSplitHook_NoFeeTerminal({terminalToken: claimData.token});
-        }
-
+        // The sucker's `_handleClaim` deposits `terminalTokenAmount` into the *fee project's* primary terminal
+        // (rebuilding its balance after the source-side cash-out) and then mints `projectTokenCount` fee-project
+        // tokens to the beneficiary — which is this hook. We don't receive terminal tokens; we receive freshly
+        // minted fee-project tokens. Snapshot that balance to measure exactly what arrived (rather than trusting
+        // the leaf field at face value), then forward to the local distributor.
         IJBToken localFeeToken = TOKENS.tokenOf(FEE_PROJECT_ID);
-
-        // Phase 1: pull terminal tokens via the sucker. Measure the delta because the sucker's claim semantics
-        // can deliver native ETH (when `claimData.token == JBConstants.NATIVE_TOKEN`) or an ERC-20.
-        uint256 terminalBalanceBefore = _balanceOf({token: claimData.token, who: address(this)});
-        sucker.claim(claimData);
-        uint256 terminalReceived = _balanceOf({token: claimData.token, who: address(this)}) - terminalBalanceBefore;
-
-        // Phase 2: pay the local fee project with what we just claimed, beneficiary = this hook. The fee
-        // project mints new fee-project tokens to us at the local weight + bonding curve.
         uint256 feeProjectBalanceBefore = IERC20(address(localFeeToken)).balanceOf(address(this));
-        if (claimData.token == JBConstants.NATIVE_TOKEN) {
-            feeTerminal.pay{value: terminalReceived}({
-                projectId: FEE_PROJECT_ID,
-                token: claimData.token,
-                amount: terminalReceived,
-                beneficiary: address(this),
-                minReturnedTokens: 0,
-                memo: "",
-                metadata: ""
-            });
-        } else {
-            IERC20(claimData.token).forceApprove({spender: address(feeTerminal), value: terminalReceived});
-            feeTerminal.pay({
-                projectId: FEE_PROJECT_ID,
-                token: claimData.token,
-                amount: terminalReceived,
-                beneficiary: address(this),
-                minReturnedTokens: 0,
-                memo: "",
-                metadata: ""
-            });
-        }
+        sucker.claim(claimData);
         uint256 feeProjectMinted = IERC20(address(localFeeToken)).balanceOf(address(this)) - feeProjectBalanceBefore;
 
-        // Phase 3: forward the freshly-minted fee-project tokens to the local distributor for the asserted
-        // referrer. If the local twin has no `IJBToken` yet, the bridged credit stays in the hook as
-        // un-pushed deposit — a future `pushTo` would not re-spend it because we haven't increased
-        // `pushedOf[block.chainid][referralProjectId]`.
+        // Forward the freshly-minted fee-project tokens to the local distributor for the asserted referrer's
+        // local twin. If the local twin has no `IJBToken` yet, the bridged credit stays in the hook's balance
+        // (an unforwarded surplus) — `pushedOf` is the high-water mark for the *source* chain's outbound bridge
+        // accounting, not the destination's; not touching it here keeps the two chains' ledgers independent.
         IJBToken refToken = TOKENS.tokenOf(referralProjectId);
         if (address(refToken) == address(0)) {
             emit Skipped({referralChainId: block.chainid, referralProjectId: referralProjectId, reason: "no token"});
@@ -352,7 +339,7 @@ contract JBReferralSplitHook is ERC165, IJBReferralSplitHook {
                 originChainId: originChainId,
                 referralProjectId: referralProjectId,
                 terminalToken: claimData.token,
-                terminalReceived: terminalReceived,
+                terminalReceived: claimData.leaf.terminalTokenAmount,
                 feeProjectMinted: feeProjectMinted,
                 pushed: 0
             });
@@ -368,7 +355,7 @@ contract JBReferralSplitHook is ERC165, IJBReferralSplitHook {
             originChainId: originChainId,
             referralProjectId: referralProjectId,
             terminalToken: claimData.token,
-            terminalReceived: terminalReceived,
+            terminalReceived: claimData.leaf.terminalTokenAmount,
             feeProjectMinted: feeProjectMinted,
             pushed: pushed
         });
@@ -381,7 +368,7 @@ contract JBReferralSplitHook is ERC165, IJBReferralSplitHook {
     /// @notice Indicates whether this contract supports the given interface.
     /// @param interfaceId The interface ID to check.
     /// @return A flag indicating support.
-    function supportsInterface(bytes4 interfaceId) public pure override(ERC165, IERC165) returns (bool) {
+    function supportsInterface(bytes4 interfaceId) public view override(ERC165, IERC165) returns (bool) {
         return interfaceId == type(IJBSplitHook).interfaceId || interfaceId == type(IJBReferralSplitHook).interfaceId
             || super.supportsInterface(interfaceId);
     }
@@ -435,17 +422,8 @@ contract JBReferralSplitHook is ERC165, IJBReferralSplitHook {
         DISTRIBUTOR.fund({hook: address(referralToken), token: IERC20(address(feeToken)), amount: amount});
     }
 
-    /// @notice Token-balance probe that handles the native-token sentinel uniformly with ERC-20 tokens.
-    function _balanceOf(address token, address who) private view returns (uint256) {
-        if (token == JBConstants.NATIVE_TOKEN) return who.balance;
-        return IERC20(token).balanceOf(who);
-    }
-
     /// @notice Left-pad an EVM address into a 32-byte beneficiary identifier for sucker leaves.
     function _toBytes32(address addr) private pure returns (bytes32) {
         return bytes32(uint256(uint160(addr)));
     }
-
-    /// @notice Accept native ETH from sucker claims (when the bridged terminal token is native).
-    receive() external payable {}
 }

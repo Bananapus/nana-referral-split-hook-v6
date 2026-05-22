@@ -18,8 +18,11 @@ import {JBClaim} from "@bananapus/suckers-v6/src/structs/JBClaim.sol";
 /// (`pushTo`). Cross-chain referrers are bridged through the fee project's sucker: `bridgeRemote` cashes out the
 /// entitled fee-project tokens via the sucker (0% tax for sucker holders) and tags the leaf with
 /// `(originChainId, referralProjectId)` in the leaf's `metadata` field so the sibling hook on the referrer's home
-/// chain can atomically claim, re-pay the local fee project, and push to the local distributor (`claimAndPush`).
-/// The full settlement is authenticated by the sucker's merkle proof — no off-chain coordination needed.
+/// chain can atomically claim and push to the local distributor (`claimAndPush`). The sucker's `_handleClaim`
+/// already deposits the bridged terminal tokens into the destination fee project's terminal and mints
+/// destination fee-project tokens to the beneficiary (this hook) — `claimAndPush` simply forwards those
+/// freshly-minted tokens. The full settlement is authenticated by the sucker's merkle proof — no off-chain
+/// coordination needed.
 /// @dev See `ARCHITECTURE.md` for the system context and `RISKS.md` for the late-entrant skew of the high-water-mark
 /// pro-rata math.
 interface IJBReferralSplitHook is IJBSplitHook {
@@ -94,8 +97,12 @@ interface IJBReferralSplitHook is IJBSplitHook {
     error JBReferralSplitHook_InvalidReferralProjectId();
     error JBReferralSplitHook_NotASucker(address sucker);
     error JBReferralSplitHook_WrongBridgeTarget(uint256 expectedChainId, uint256 actualChainId);
+    error JBReferralSplitHook_SuckerPeerMismatch(uint256 expectedPeerChainId, uint256 actualPeerChainId);
     error JBReferralSplitHook_LeafBeneficiaryMismatch(bytes32 expected, bytes32 got);
-    error JBReferralSplitHook_NoFeeTerminal(address terminalToken);
+    error JBReferralSplitHook_LeafMetadataMismatch(bytes32 expected, bytes32 got);
+    error JBReferralSplitHook_OriginIsLocal(uint256 chainId);
+    error JBReferralSplitHook_ChainIdTooLarge(uint256 chainId);
+    error JBReferralSplitHook_ReferralProjectIdTooLarge(uint256 referralProjectId);
 
     //*********************************************************************//
     // --------------------------- view methods -------------------------- //
@@ -173,12 +180,16 @@ interface IJBReferralSplitHook is IJBSplitHook {
 
     /// @notice Atomically claim a bridged credit and push it to the local distributor for the referrer's
     /// local-twin project.
-    /// @dev Permissionless. Validates that the sucker is a registered sucker of the fee project, the claim's
-    /// beneficiary is this hook, and the leaf's `metadata` matches the asserted `(originChainId, referralProjectId)`
-    /// pair (the merkle proof inside `sucker.claim` already authenticated `data` — the equality check here just
-    /// enforces correct argument ordering). Then it pulls terminal tokens via `sucker.claim`, pays the local fee
-    /// project to mint new fee-project tokens, and forwards them to the distributor for the local twin of
-    /// `referralProjectId`. Skips (without reverting) when the local twin has no `IJBToken` yet.
+    /// @dev Permissionless. Validates that `originChainId != block.chainid`, the sucker is a registered sucker
+    /// of the fee project, the claim's beneficiary is this hook, and the leaf's `metadata` matches the asserted
+    /// `(originChainId, referralProjectId)` pair (the merkle proof inside `sucker.claim` already authenticated
+    /// `metadata` — the equality check here just enforces correct argument ordering). Then it calls
+    /// `sucker.claim`, which deposits the bridged terminal tokens into the destination fee project's terminal
+    /// AND mints destination fee-project tokens directly to this hook (the leaf's `beneficiary`). The hook
+    /// measures the fee-project-token balance delta and forwards it to the local distributor for
+    /// `referralProjectId`'s local twin. Skips (without reverting) when the local twin has no `IJBToken` yet —
+    /// the unforwarded fee-project tokens stay in this hook's balance; no `pushedOf` accounting on the
+    /// destination side because the source chain's `bridgeRemote` already advanced its high-water mark.
     /// @param originChainId The chain the credit was originally earned on.
     /// @param referralProjectId The local twin's project ID on this chain.
     /// @param sucker The fee project's sucker pair the claim belongs to.
@@ -199,6 +210,6 @@ interface IJBReferralSplitHook is IJBSplitHook {
     /// upper bits are reserved.
     /// @param originChainId The chain the credit was originally earned on.
     /// @param referralProjectId The referring project's bare ID on the destination chain.
-    /// @return data The packed value to pass into `sucker.prepare`.
+    /// @return metadata The packed value to pass into `sucker.prepare`.
     function packLeafMetadata(uint256 originChainId, uint256 referralProjectId) external pure returns (bytes32 metadata);
 }
