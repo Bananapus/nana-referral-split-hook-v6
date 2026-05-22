@@ -27,7 +27,7 @@ import {IJBReferralSplitHook} from "./interfaces/IJBReferralSplitHook.sol";
 /// @dev Referrers are identified by the `(referralChainId, referralProjectId)` pair recorded in
 /// `JBTerminalStore.feeVolumeByReferralOf`. Same-chain referrers are pushed to the local distributor by `pushTo`.
 /// Cross-chain referrers are bridged through the fee project's sucker by `bridgeRemote` and atomically settled on
-/// the home chain by `claimAndPush` — the leaf's `data` field carries `(originChainId, referralProjectId)` so the
+/// the home chain by `claimAndPush` — the leaf's `metadata` field carries `(originChainId, referralProjectId)` so the
 /// receiving hook knows exactly which local-twin project the bridged credit is for, all under the merkle proof's
 /// authentication.
 /// @dev The volume ratio comes from
@@ -109,15 +109,18 @@ contract JBReferralSplitHook is ERC165, IJBReferralSplitHook {
     //*********************************************************************//
 
     /// @inheritdoc IJBReferralSplitHook
-    function packLeafData(uint256 originChainId, uint256 referralProjectId)
+    function packLeafMetadata(
+        uint256 originChainId,
+        uint256 referralProjectId
+    )
         public
         pure
         override
-        returns (bytes32 data)
+        returns (bytes32 metadata)
     {
         // Pack into a single bytes32. Both fields are bounded by the encoding nana-core uses for the transient
         // referral slot, so this representation is lossless for any value reachable through that pipeline.
-        data = bytes32((originChainId << 64) | referralProjectId);
+        metadata = bytes32((originChainId << 64) | referralProjectId);
     }
 
     //*********************************************************************//
@@ -224,7 +227,7 @@ contract JBReferralSplitHook is ERC165, IJBReferralSplitHook {
 
         // Tag the leaf with `(originChainId, referralProjectId)` so the sibling hook on `referralChainId` knows
         // which local-twin project to settle to when it calls `claimAndPush`.
-        bytes32 leafData = packLeafData({originChainId: block.chainid, referralProjectId: referralProjectId});
+        bytes32 leafMetadata = packLeafMetadata({originChainId: block.chainid, referralProjectId: referralProjectId});
 
         // Approve the sucker for exactly `bridged` fee-project tokens. The sucker pulls via `safeTransferFrom`
         // inside `prepare`, then cashes them out via the source terminal (0% tax for sucker holders on omnichain
@@ -240,7 +243,7 @@ contract JBReferralSplitHook is ERC165, IJBReferralSplitHook {
             beneficiary: _toBytes32(address(this)),
             minTokensReclaimed: 0,
             token: terminalToken,
-            data: leafData
+            metadata: leafMetadata
         });
 
         emit BridgedRemote({
@@ -249,7 +252,7 @@ contract JBReferralSplitHook is ERC165, IJBReferralSplitHook {
             sucker: sucker,
             terminalToken: terminalToken,
             amount: bridged,
-            leafData: leafData
+            leafMetadata: leafMetadata
         });
     }
 
@@ -283,12 +286,15 @@ contract JBReferralSplitHook is ERC165, IJBReferralSplitHook {
             });
         }
 
-        // The merkle proof inside `sucker.claim` will validate `claimData.leaf.data`; we enforce that the
+        // The merkle proof inside `sucker.claim` will validate `claimData.leaf.metadata`; we enforce that the
         // asserted `(originChainId, referralProjectId)` pair matches the leaf's data here so a caller can't
         // substitute the projectId argument and redirect bridged tokens to a different local distributor.
-        bytes32 expectedData = packLeafData({originChainId: originChainId, referralProjectId: referralProjectId});
-        if (claimData.leaf.data != expectedData) {
-            revert JBReferralSplitHook_LeafBeneficiaryMismatch({expected: expectedData, got: claimData.leaf.data});
+        bytes32 expectedMetadata =
+            packLeafMetadata({originChainId: originChainId, referralProjectId: referralProjectId});
+        if (claimData.leaf.metadata != expectedMetadata) {
+            revert JBReferralSplitHook_LeafBeneficiaryMismatch({
+                expected: expectedMetadata, got: claimData.leaf.metadata
+            });
         }
 
         // Resolve the local fee project's primary terminal for the bridged terminal token. The sibling chain's

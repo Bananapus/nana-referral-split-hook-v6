@@ -17,7 +17,7 @@ import {JBClaim} from "@bananapus/suckers-v6/src/structs/JBClaim.sol";
 /// `JBTerminalStore.feeVolumeByReferralOf`. Same-chain referrers get pushed to the local distributor directly
 /// (`pushTo`). Cross-chain referrers are bridged through the fee project's sucker: `bridgeRemote` cashes out the
 /// entitled fee-project tokens via the sucker (0% tax for sucker holders) and tags the leaf with
-/// `(originChainId, referralProjectId)` in the leaf's `data` field so the sibling hook on the referrer's home
+/// `(originChainId, referralProjectId)` in the leaf's `metadata` field so the sibling hook on the referrer's home
 /// chain can atomically claim, re-pay the local fee project, and push to the local distributor (`claimAndPush`).
 /// The full settlement is authenticated by the sucker's merkle proof — no off-chain coordination needed.
 /// @dev See `ARCHITECTURE.md` for the system context and `RISKS.md` for the late-entrant skew of the high-water-mark
@@ -50,14 +50,15 @@ interface IJBReferralSplitHook is IJBSplitHook {
     /// @param sucker The sucker used to bridge.
     /// @param terminalToken The terminal token cashed out into for the bridge.
     /// @param amount The number of fee-project tokens cashed out into the sucker.
-    /// @param leafData The `bytes32 data` payload written into the sucker leaf for atomic destination settlement.
+    /// @param leafMetadata The `bytes32 metadata` payload written into the sucker leaf for atomic destination
+    /// settlement.
     event BridgedRemote(
         uint256 indexed referralChainId,
         uint256 indexed referralProjectId,
         IJBSucker sucker,
         address terminalToken,
         uint256 amount,
-        bytes32 leafData
+        bytes32 leafMetadata
     );
 
     /// @notice Emitted when a bridged claim is settled on the referrer's home chain: tokens are claimed from the
@@ -152,7 +153,7 @@ interface IJBReferralSplitHook is IJBSplitHook {
     /// @notice Bridge a cross-chain referrer's accrued pro-rata share through the fee project's sucker.
     /// @dev Permissionless. Cashes out the entitled fee-project tokens via `sucker.prepare`, which (for sucker
     /// holders on omnichain revnets) pays 0% cash-out tax — the bridge is loss-free in fee-project-token terms.
-    /// The leaf's `data` field is set to `(originChainId, referralProjectId)` so the sibling hook on
+    /// The leaf's `metadata` field is set to `(originChainId, referralProjectId)` so the sibling hook on
     /// `referralChainId` can atomically settle on `claimAndPush`. Reverts if the sucker isn't a registered
     /// sucker of the fee project. Skips (without reverting) on the usual no-token / no-volume / caught-up cases.
     /// `referralChainId` must not equal `block.chainid` (that's a local push — use `pushTo`).
@@ -173,7 +174,7 @@ interface IJBReferralSplitHook is IJBSplitHook {
     /// @notice Atomically claim a bridged credit and push it to the local distributor for the referrer's
     /// local-twin project.
     /// @dev Permissionless. Validates that the sucker is a registered sucker of the fee project, the claim's
-    /// beneficiary is this hook, and the leaf's `data` matches the asserted `(originChainId, referralProjectId)`
+    /// beneficiary is this hook, and the leaf's `metadata` matches the asserted `(originChainId, referralProjectId)`
     /// pair (the merkle proof inside `sucker.claim` already authenticated `data` — the equality check here just
     /// enforces correct argument ordering). Then it pulls terminal tokens via `sucker.claim`, pays the local fee
     /// project to mint new fee-project tokens, and forwards them to the distributor for the local twin of
@@ -192,12 +193,12 @@ interface IJBReferralSplitHook is IJBSplitHook {
         external
         returns (uint256 pushed);
 
-    /// @notice Pack `(originChainId, referralProjectId)` into the `bytes32 data` payload carried by the sucker
+    /// @notice Pack `(originChainId, referralProjectId)` into the `bytes32 metadata` payload carried by the sucker
     /// leaf. Pure helper so off-chain integrations and tests can derive the value identically.
     /// @dev Layout: bits [95:64] = `originChainId` (uint32), bits [63:0] = `referralProjectId` (uint64). The
     /// upper bits are reserved.
     /// @param originChainId The chain the credit was originally earned on.
     /// @param referralProjectId The referring project's bare ID on the destination chain.
     /// @return data The packed value to pass into `sucker.prepare`.
-    function packLeafData(uint256 originChainId, uint256 referralProjectId) external pure returns (bytes32 data);
+    function packLeafMetadata(uint256 originChainId, uint256 referralProjectId) external pure returns (bytes32 metadata);
 }

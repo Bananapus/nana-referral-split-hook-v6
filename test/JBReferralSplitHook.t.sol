@@ -18,7 +18,7 @@ import {IJBReferralSplitHook} from "../src/interfaces/IJBReferralSplitHook.sol";
 
 /// @notice Smoke tests for `JBReferralSplitHook`. Full unit + integration coverage layers on once
 /// `@bananapus/core-v6` 0.0.59 and `@bananapus/suckers-v6` 0.0.50 (with the nested
-/// `feeVolumeByReferralOf(terminal, chainId, projectId)` mapping and the `bytes32 data` leaf field) are published.
+/// `feeVolumeByReferralOf(terminal, chainId, projectId)` mapping and the `bytes32 metadata` leaf field) are published.
 contract JBReferralSplitHookTest is Test {
     JBReferralSplitHook internal hook;
 
@@ -150,7 +150,7 @@ contract JBReferralSplitHookTest is Test {
                 beneficiary: bytes32(uint256(uint160(address(hook)))),
                 projectTokenCount: 1 ether,
                 terminalTokenAmount: 1 ether,
-                data: hook.packLeafData({originChainId: 1, referralProjectId: 42})
+                metadata: hook.packLeafMetadata({originChainId: 1, referralProjectId: 42})
             }),
             proof: proof
         });
@@ -171,7 +171,7 @@ contract JBReferralSplitHookTest is Test {
 
         bytes32[32] memory proof;
         // Caller claims this leaf is for projectId 99 — but the leaf's data was packed for projectId 42.
-        bytes32 honestData = hook.packLeafData({originChainId: 1, referralProjectId: 42});
+        bytes32 honestMetadata = hook.packLeafMetadata({originChainId: 1, referralProjectId: 42});
         JBClaim memory claimData = JBClaim({
             token: makeAddr("terminalToken"),
             leaf: JBLeaf({
@@ -179,24 +179,24 @@ contract JBReferralSplitHookTest is Test {
                 beneficiary: bytes32(uint256(uint160(address(hook)))),
                 projectTokenCount: 1 ether,
                 terminalTokenAmount: 1 ether,
-                data: honestData
+                metadata: honestMetadata
             }),
             proof: proof
         });
 
-        bytes32 lyingData = hook.packLeafData({originChainId: 1, referralProjectId: 99});
+        bytes32 lyingMetadata = hook.packLeafMetadata({originChainId: 1, referralProjectId: 99});
         vm.expectRevert(
             abi.encodeWithSelector(
-                IJBReferralSplitHook.JBReferralSplitHook_LeafBeneficiaryMismatch.selector, lyingData, honestData
+                IJBReferralSplitHook.JBReferralSplitHook_LeafBeneficiaryMismatch.selector, lyingMetadata, honestMetadata
             )
         );
         hook.claimAndPush({originChainId: 1, referralProjectId: 99, sucker: sucker, claimData: claimData});
     }
 
-    function test_packLeafData_roundTrips() public view {
+    function test_packLeafMetadata_roundTrips() public view {
         uint256 originChainId = 12_345;
         uint256 referralProjectId = 67_890;
-        bytes32 packed = hook.packLeafData({originChainId: originChainId, referralProjectId: referralProjectId});
+        bytes32 packed = hook.packLeafMetadata({originChainId: originChainId, referralProjectId: referralProjectId});
 
         // Lower 64 bits = projectId; bits [95:64] = chainId.
         uint256 raw = uint256(packed);
