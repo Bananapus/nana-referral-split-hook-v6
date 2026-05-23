@@ -1,6 +1,6 @@
 {
   "name": "@bananapus/referral-split-hook-v6",
-  "version": "0.0.4",
+  "version": "0.0.5",
   "license": "MIT",
   "repository": {
     "type": "git",
@@ -24,10 +24,10 @@
     "deploy:testnets": "source ./.env && npx sphinx propose ./script/Deploy.s.sol --networks testnets"
   },
   "dependencies": {
-    "@bananapus/core-v6": "^0.0.59",
-    "@bananapus/distributor-v6": "^0.0.18",
-    "@bananapus/permission-ids-v6": "^0.0.25",
-    "@bananapus/suckers-v6": "^0.0.50",
+    "@bananapus/core-v6": "^0.0.60",
+    "@bananapus/distributor-v6": "^0.0.23",
+    "@bananapus/permission-ids-v6": "^0.0.27",
+    "@bananapus/suckers-v6": "^0.0.52",
     "@openzeppelin/contracts": "5.6.1",
     "@prb/math": "4.1.1"
   },
