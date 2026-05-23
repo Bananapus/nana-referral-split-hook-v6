@@ -23,6 +23,13 @@ import {JBClaim} from "@bananapus/suckers-v6/src/structs/JBClaim.sol";
 /// destination fee-project tokens to the beneficiary (this hook) — `claimAndPush` simply forwards those
 /// freshly-minted tokens. The full settlement is authenticated by the sucker's merkle proof — no off-chain
 /// coordination needed.
+/// @dev Naming convention — `referralProjectId` ALWAYS refers to the projectId on the referrer's home chain
+/// (`referralChainId`), never to a numerically-matching projectId on some other chain. Juicebox projectId spaces
+/// are per-chain, so a referrer registered as `42` on Optimism is unrelated to project `42` on Base. All call
+/// sites in this hook — `pushTo`, `bridgeRemote`, `claimAndPush`, `packLeafMetadata`, and the source-side ledger
+/// at `JBTerminalStore.feeVolumeByReferralOf(terminal, referralChainId, referralProjectId)` — interpret the
+/// field the same way. Callers crediting a cross-chain referrer at the original cashOut/pay/payout call site
+/// must therefore pass the referrer's projectId on the referrer's chain, not the source-chain projectId.
 /// @dev See `ARCHITECTURE.md` for the system context and `RISKS.md` for the late-entrant skew of the high-water-mark
 /// pro-rata math.
 interface IJBReferralSplitHook is IJBSplitHook {
@@ -134,14 +141,25 @@ interface IJBReferralSplitHook is IJBSplitHook {
     /// @notice Cumulative fee-project tokens received by this hook via `processSplitWith`.
     function totalDeposited() external view returns (uint256);
 
-    /// @notice High-water mark of fee-project tokens forwarded for a given
-    /// `(referralChainId, referralProjectId)` pair. Same-chain pairs are pushed directly to the local distributor;
-    /// cross-chain pairs are bridged out via `bridgeRemote`. Both paths advance this mark by the same accounting
-    /// formula, so a referrer is paid at most their pro-rata share regardless of which side does the work.
+    /// @notice High-water mark of fee-project tokens forwarded *to the local distributor* for a same-chain
+    /// referrer (i.e. one whose `referralChainId == block.chainid`).
+    /// @dev Same-chain only. The cross-chain analog is `bridgedOutOf`. The two are tracked in separate
+    /// mappings because they represent very different actions — a local push to a distributor, versus tokens
+    /// cashed out into a sucker for cross-chain bridging — and prior versions that conflated them under one
+    /// nested mapping were error-prone for off-chain indexers.
+    /// @param localReferralProjectId The referring project's projectId on `block.chainid`.
+    /// @return The cumulative amount pushed locally for this projectId.
+    function pushedLocallyOf(uint256 localReferralProjectId) external view returns (uint256);
+
+    /// @notice High-water mark of fee-project tokens cashed out via `bridgeRemote` for a cross-chain referrer.
+    /// @dev Cross-chain only. The same-chain analog is `pushedLocallyOf`. Keyed by `(referralChainId,
+    /// referralProjectId)` where `referralProjectId` is the referrer's projectId *on `referralChainId`* — NOT
+    /// on the source. Each chain has an independent projectId space, so a numeric `42` on Optimism and a
+    /// numeric `42` on Base identify two different projects and get two independent bridge budgets here.
     /// @param referralChainId The referrer's home chain ID.
-    /// @param referralProjectId The referring project on that chain.
-    /// @return The cumulative amount processed for this pair.
-    function pushedOf(uint256 referralChainId, uint256 referralProjectId) external view returns (uint256);
+    /// @param referralProjectId The referring project's projectId on `referralChainId`.
+    /// @return The cumulative amount bridged out for this pair.
+    function bridgedOutOf(uint256 referralChainId, uint256 referralProjectId) external view returns (uint256);
 
     //*********************************************************************//
     // -------------------------- external txs ---------------------------- //

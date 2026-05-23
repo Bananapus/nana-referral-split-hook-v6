@@ -71,15 +71,18 @@ contract JBReferralSplitHookTest is Test {
 
     function test_pushTo_skipsRemoteChainCredit() public {
         // A referrer on a different chain — `pushTo` is strictly same-chain. Use `bridgeRemote` for cross-chain.
+        // Same-chain ledger stays untouched, and so does the cross-chain ledger (since `pushTo` never writes
+        // there regardless of input).
         uint256 remoteChainId = block.chainid + 1;
         assertEq(hook.pushTo({referralChainId: remoteChainId, referralProjectId: 42}), 0);
-        assertEq(hook.pushedOf({referralChainId: remoteChainId, referralProjectId: 42}), 0);
+        assertEq(hook.pushedLocallyOf(42), 0);
+        assertEq(hook.bridgedOutOf({referralChainId: remoteChainId, referralProjectId: 42}), 0);
     }
 
     function test_pushTo_noopsWhenTotalVolumeIsZero() public {
         vm.mockCall(store, abi.encodeCall(IJBTerminalStore.totalFeeVolumeOf, (terminal)), abi.encode(uint256(0)));
         assertEq(hook.pushTo({referralChainId: block.chainid, referralProjectId: 42}), 0);
-        assertEq(hook.pushedOf({referralChainId: block.chainid, referralProjectId: 42}), 0);
+        assertEq(hook.pushedLocallyOf(42), 0);
     }
 
     function test_bridgeRemote_revertsOnSameChain() public {

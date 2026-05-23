@@ -1,5 +1,24 @@
 # Changelog
 
+## 0.0.3
+
+Storage and naming clarifications. Breaking ABI.
+
+### Storage
+
+- **`pushedOf` split into two semantically distinct mappings**:
+  - `pushedLocallyOf(uint256 localReferralProjectId)` — high-water mark for same-chain pushes to the local distributor.
+  - `bridgedOutOf(uint256 referralChainId, uint256 referralProjectId)` — high-water mark for outbound bridges.
+  The previous single nested mapping was reused for both meanings; off-chain indexers had to disambiguate by checking whether the chainId key equalled `block.chainid`. The two are now clearly separate slots.
+
+### Documentation
+
+- **Cross-chain projectId convention spelled out at the interface natspec.** `referralProjectId` everywhere in this hook — and in the source-side `JBTerminalStore.feeVolumeByReferralOf` ledger — refers to the projectId on the referrer's home chain (`referralChainId`), never the source chain. Projectid spaces are per-chain; the hook never assumes numeric equivalence across chains. Callers tagging a cross-chain referrer must pass the referrer's projectId on the referrer's chain.
+
+### Internal
+
+- `_consumePendingFor` renamed to `_pendingDeltaFor` and no longer writes to storage. Callers pass `alreadyProcessed` and write back to their own slot (`pushedLocallyOf` or `bridgedOutOf`). This decoupling is what lets the same math drive both ledgers without conflating them.
+
 ## 0.0.2
 
 Production hardening for the cross-chain bridge path. No on-chain deployments yet, so changes are breaking-permissible.

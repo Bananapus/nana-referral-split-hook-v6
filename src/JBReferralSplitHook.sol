@@ -67,9 +67,17 @@ contract JBReferralSplitHook is ERC165, IJBReferralSplitHook {
     uint256 public override totalDeposited;
 
     /// @inheritdoc IJBReferralSplitHook
-    /// @dev Nested by `referralChainId` then `referralProjectId` so the high-water mark is unique per
-    /// cross-chain pair. The same `projectId` on two different chains tracks two independent push budgets.
-    mapping(uint256 referralChainId => mapping(uint256 referralProjectId => uint256)) public override pushedOf;
+    /// @dev Keyed by the referrer's projectId on `block.chainid`. The local high-water mark for same-chain
+    /// pushes. Separate from `bridgedOutOf` because the two have different semantics: this slot tracks
+    /// distributor forwards, the other tracks bridge outflows. Conflating them under one mapping made the
+    /// storage hard to reason about for off-chain indexers.
+    mapping(uint256 localReferralProjectId => uint256) public override pushedLocallyOf;
+
+    /// @inheritdoc IJBReferralSplitHook
+    /// @dev Keyed by `(referralChainId, referralProjectId)` where `referralProjectId` is the referrer's
+    /// projectId *on `referralChainId`* — projectId spaces are independent per chain, so the same numeric
+    /// projectId on two different chains represents two different projects and gets two independent budgets.
+    mapping(uint256 referralChainId => mapping(uint256 referralProjectId => uint256)) public override bridgedOutOf;
 
     //*********************************************************************//
     // -------------------------- constructor ---------------------------- //
@@ -171,20 +179,32 @@ contract JBReferralSplitHook is ERC165, IJBReferralSplitHook {
         }
 
         // Cross-chain referrers must use `bridgeRemote`. This skip keeps `pushTo` strictly the same-chain path.
+        // Note: `referralProjectId` is interpreted as the projectId *on the referrer's home chain* — projectId
+        // spaces are independent per chain, so for `referralChainId == block.chainid` this is the local
+        // projectId; for any other chain it identifies a project in that chain's registry and we must not
+        // attempt a local lookup with it.
         if (referralChainId != block.chainid) {
             emit Skipped({referralChainId: referralChainId, referralProjectId: referralProjectId, reason: "remote"});
             return 0;
         }
 
-        uint256 deltaToProcess = _consumePendingFor(referralChainId, referralProjectId);
+        uint256 alreadyPushed = pushedLocallyOf[referralProjectId];
+        uint256 deltaToProcess = _pendingDeltaFor({
+            referralChainId: referralChainId, referralProjectId: referralProjectId, alreadyProcessed: alreadyPushed
+        });
         if (deltaToProcess == 0) return 0;
 
+        // Advance the high-water mark BEFORE the external token transfer so reentrancy can't double-spend.
+        unchecked {
+            pushedLocallyOf[referralProjectId] = alreadyPushed + deltaToProcess;
+        }
+
         // Resolve the referring project's IVotes token on this chain. Credit-only projects (no ERC-20) cannot
-        // receive a push — their share stays pending in this hook until they tokenize.
+        // receive a push — roll the high-water mark back so the next `pushTo` retries once the referrer
+        // tokenizes (the share stays pending in this hook's balance, accumulating with future deposits).
         IJBToken refToken = TOKENS.tokenOf(referralProjectId);
         if (address(refToken) == address(0)) {
-            // We over-advanced `pushedOf` via `_consumePendingFor`; undo so the next push retries.
-            pushedOf[referralChainId][referralProjectId] -= deltaToProcess;
+            pushedLocallyOf[referralProjectId] = alreadyPushed;
             emit Skipped({referralChainId: referralChainId, referralProjectId: referralProjectId, reason: "no token"});
             return 0;
         }
@@ -238,13 +258,28 @@ contract JBReferralSplitHook is ERC165, IJBReferralSplitHook {
             });
         }
 
-        uint256 deltaToProcess = _consumePendingFor(referralChainId, referralProjectId);
+        uint256 alreadyBridged = bridgedOutOf[referralChainId][referralProjectId];
+        uint256 deltaToProcess = _pendingDeltaFor({
+            referralChainId: referralChainId, referralProjectId: referralProjectId, alreadyProcessed: alreadyBridged
+        });
         if (deltaToProcess == 0) return 0;
+
+        // Advance the high-water mark BEFORE the sucker call so reentrancy can't double-bridge. `bridgedOutOf`
+        // tracks outbound bridge volume per `(referralChainId, referralProjectId)`; it is INDEPENDENT of
+        // `pushedLocallyOf` — each chain bears separate ledgers because projectId spaces are independent per
+        // chain (a numeric `42` on Optimism and a numeric `42` on Base are unrelated projects).
+        unchecked {
+            bridgedOutOf[referralChainId][referralProjectId] = alreadyBridged + deltaToProcess;
+        }
 
         bridged = deltaToProcess;
 
         // Tag the leaf with `(originChainId, referralProjectId)` so the sibling hook on `referralChainId` knows
-        // which local-twin project to settle to when it calls `claimAndPush`.
+        // which local-twin project to settle to when it calls `claimAndPush`. `referralProjectId` here is the
+        // projectId AS IT EXISTS on `referralChainId` — the source's `feeVolumeByReferralOf` ledger keys this
+        // way too, and the destination's `TOKENS.tokenOf(referralProjectId)` lookup uses the destination's
+        // registry. The convention is unambiguous: across the whole pipeline, this field always refers to the
+        // projectId on the referrer's home chain.
         bytes32 leafMetadata = packLeafMetadata({originChainId: block.chainid, referralProjectId: referralProjectId});
 
         // Approve the sucker for exactly `bridged` fee-project tokens. The sucker pulls via `safeTransferFrom`
@@ -329,9 +364,11 @@ contract JBReferralSplitHook is ERC165, IJBReferralSplitHook {
         uint256 feeProjectMinted = IERC20(address(localFeeToken)).balanceOf(address(this)) - feeProjectBalanceBefore;
 
         // Forward the freshly-minted fee-project tokens to the local distributor for the asserted referrer's
-        // local twin. If the local twin has no `IJBToken` yet, the bridged credit stays in the hook's balance
-        // (an unforwarded surplus) — `pushedOf` is the high-water mark for the *source* chain's outbound bridge
-        // accounting, not the destination's; not touching it here keeps the two chains' ledgers independent.
+        // local twin (`referralProjectId` is the local twin's projectId on `block.chainid` — independent of any
+        // numerically-matching projectId on `originChainId`, since projectId spaces are per-chain). If the local
+        // twin has no `IJBToken` yet, the bridged credit stays in the hook's balance (an unforwarded surplus).
+        // No `bridgedOutOf` / `pushedLocallyOf` write here — both ledgers track the *source* side of work this
+        // hook initiated, not destinations of bridges initiated by other chains' hooks.
         IJBToken refToken = TOKENS.tokenOf(referralProjectId);
         if (address(refToken) == address(0)) {
             emit Skipped({referralChainId: block.chainid, referralProjectId: referralProjectId, reason: "no token"});
@@ -378,12 +415,22 @@ contract JBReferralSplitHook is ERC165, IJBReferralSplitHook {
     //*********************************************************************//
 
     /// @notice Compute the delta between this referrer's current entitled share and what's already been processed,
-    /// and atomically advance `pushedOf` by that delta. Returns 0 if there's nothing to do (no volume, total at
-    /// zero, or caught up).
-    /// @dev Reentrancy: callers update state before any external token transfer. If a later phase of `pushTo` or
-    /// `bridgeRemote` discovers the recipient is unfundable (e.g. no IJBToken), they unwind by subtracting the
-    /// same delta from `pushedOf` so a future call retries.
-    function _consumePendingFor(uint256 referralChainId, uint256 referralProjectId) private returns (uint256 delta) {
+    /// and return that delta. Returns 0 (and emits `Skipped`) when there's nothing to do (no volume on the
+    /// terminal, no volume for the pair, or already caught up to the current entitlement).
+    /// @dev Pure-of-storage with respect to the high-water mark: caller passes `alreadyProcessed` and is
+    /// responsible for writing it back. This is what lets the same helper drive both the same-chain push
+    /// ledger (`pushedLocallyOf`) and the outbound-bridge ledger (`bridgedOutOf`) without conflating them.
+    /// @dev Reentrancy: the caller advances its own slot before any external token transfer; reentrancy via the
+    /// sucker or distributor cannot grow `delta` because both `totalDeposited` and `feeVolumeByReferralOf` are
+    /// monotonic.
+    function _pendingDeltaFor(
+        uint256 referralChainId,
+        uint256 referralProjectId,
+        uint256 alreadyProcessed
+    )
+        private
+        returns (uint256 delta)
+    {
         uint256 totalVol = STORE.totalFeeVolumeOf(TERMINAL);
         if (totalVol == 0) {
             emit Skipped({referralChainId: referralChainId, referralProjectId: referralProjectId, reason: "no volume"});
@@ -399,19 +446,14 @@ contract JBReferralSplitHook is ERC165, IJBReferralSplitHook {
         }
 
         uint256 entitled = mulDiv(totalDeposited, refVol, totalVol);
-        uint256 alreadyPushed = pushedOf[referralChainId][referralProjectId];
-        if (entitled <= alreadyPushed) {
+        if (entitled <= alreadyProcessed) {
             emit Skipped({referralChainId: referralChainId, referralProjectId: referralProjectId, reason: "caught up"});
             return 0;
         }
 
         unchecked {
-            delta = entitled - alreadyPushed;
+            delta = entitled - alreadyProcessed;
         }
-        // Advance the high-water mark BEFORE the caller does its external work. Reentrancy via the sucker or
-        // distributor cannot grow the delta because both `totalDeposited` and `feeVolumeByReferralOf` are
-        // monotonic.
-        pushedOf[referralChainId][referralProjectId] = entitled;
     }
 
     /// @notice Approve the distributor and forward `amount` fee-project tokens to it, keyed on the referrer's
