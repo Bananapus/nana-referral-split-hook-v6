@@ -7,6 +7,7 @@ import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import {SafeERC20} from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
 import {mulDiv} from "@prb/math/src/Common.sol";
 
+import {IJBController} from "@bananapus/core-v6/src/interfaces/IJBController.sol";
 import {IJBDirectory} from "@bananapus/core-v6/src/interfaces/IJBDirectory.sol";
 import {IJBSplitHook} from "@bananapus/core-v6/src/interfaces/IJBSplitHook.sol";
 import {IJBTerminalStore} from "@bananapus/core-v6/src/interfaces/IJBTerminalStore.sol";
@@ -235,6 +236,10 @@ contract JBReferralSplitHook is ERC165, IJBReferralSplitHook {
         if (referralProjectId == 0 || referralProjectId == FEE_PROJECT_ID) {
             revert JBReferralSplitHook_InvalidReferralProjectId();
         }
+        // EIP-155 chain ids are strictly positive; rejecting 0 explicitly stops a caller from constructing a
+        // call that would otherwise rely on the downstream `peerChainId()` returning a different value to
+        // revert with `SuckerPeerMismatch`. Defense in depth: ban it here so the failure mode is unambiguous.
+        if (referralChainId == 0) revert JBReferralSplitHook_ZeroChainId();
         if (referralChainId == block.chainid) {
             revert JBReferralSplitHook_WrongBridgeTarget({
                 expectedChainId: referralChainId, actualChainId: block.chainid
@@ -324,6 +329,11 @@ contract JBReferralSplitHook is ERC165, IJBReferralSplitHook {
             revert JBReferralSplitHook_InvalidReferralProjectId();
         }
 
+        // EIP-155 chain ids are strictly positive; the proof's `_inboxOf[token].root` would never legitimately
+        // contain a leaf claiming to originate from chain 0, but rejecting up front gives a precise error
+        // before any external call.
+        if (originChainId == 0) revert JBReferralSplitHook_ZeroChainId();
+
         // A bridged claim must come from a *different* chain. Self-bridging is impossible (`bridgeRemote` already
         // rejects it), but block it explicitly here so a caller can't construct a synthetic local-chain leaf and
         // route it through this entrypoint to skip the same-chain `pushTo` high-water-mark accounting.
@@ -365,13 +375,32 @@ contract JBReferralSplitHook is ERC165, IJBReferralSplitHook {
 
         // Forward the freshly-minted fee-project tokens to the local distributor for the asserted referrer's
         // local twin (`referralProjectId` is the local twin's projectId on `block.chainid` — independent of any
-        // numerically-matching projectId on `originChainId`, since projectId spaces are per-chain). If the local
-        // twin has no `IJBToken` yet, the bridged credit stays in the hook's balance (an unforwarded surplus).
+        // numerically-matching projectId on `originChainId`, since projectId spaces are per-chain).
         // No `bridgedOutOf` / `pushedLocallyOf` write here — both ledgers track the *source* side of work this
         // hook initiated, not destinations of bridges initiated by other chains' hooks.
         IJBToken refToken = TOKENS.tokenOf(referralProjectId);
         if (address(refToken) == address(0)) {
-            emit Skipped({referralChainId: block.chainid, referralProjectId: referralProjectId, reason: "no token"});
+            // BURN-OVER-STRAND: the sucker's `_handleClaim` already deposited the bridged terminal tokens
+            // into the fee project's balance AND minted us fee-project tokens. The leaf is now consumed
+            // (executed-bitmap set on the sucker), so there's no future settlement that can use these
+            // freshly-minted tokens. Holding them in this hook would strand value indefinitely. Burning
+            // them here keeps the bridged terminal-token value intact in the fee project's balance but
+            // returns the offsetting supply to zero, so every existing fee-project token holder's
+            // pro-rata claim on the new surplus grows. msg.sender == account on `burnTokensOf` is
+            // auto-allowed, so no extra permission grant is needed.
+            if (feeProjectMinted != 0) {
+                IJBController(address(DIRECTORY.controllerOf(FEE_PROJECT_ID)))
+                    .burnTokensOf({
+                    holder: address(this), projectId: FEE_PROJECT_ID, tokenCount: feeProjectMinted, memo: ""
+                });
+                emit BurnedOnStrand({
+                    originChainId: originChainId,
+                    referralProjectId: referralProjectId,
+                    feeProjectBurned: feeProjectMinted
+                });
+            } else {
+                emit Skipped({referralChainId: block.chainid, referralProjectId: referralProjectId, reason: "no token"});
+            }
             emit ClaimedRemote({
                 originChainId: originChainId,
                 referralProjectId: referralProjectId,
@@ -395,6 +424,74 @@ contract JBReferralSplitHook is ERC165, IJBReferralSplitHook {
             terminalReceived: claimData.leaf.terminalTokenAmount,
             feeProjectMinted: feeProjectMinted,
             pushed: pushed
+        });
+    }
+
+    /// @inheritdoc IJBReferralSplitHook
+    function burnUnbridgeableCreditFor(
+        uint256 referralChainId,
+        uint256 referralProjectId
+    )
+        external
+        override
+        returns (uint256 burned)
+    {
+        // Same malformed-arg guards as `bridgeRemote` — a `chainId == block.chainid` credit isn't a cross-chain
+        // case at all (and same-chain credits with no destination ERC-20 are deferred via `pushTo`, not burned
+        // here), `chainId == 0` is invalid EIP-155, and `projectId == 0 || projectId == FEE_PROJECT_ID` are
+        // sentinel/self-reference cases.
+        if (referralProjectId == 0 || referralProjectId == FEE_PROJECT_ID) {
+            revert JBReferralSplitHook_InvalidReferralProjectId();
+        }
+        if (referralChainId == 0) revert JBReferralSplitHook_ZeroChainId();
+        if (referralChainId == block.chainid) {
+            revert JBReferralSplitHook_WrongBridgeTarget({
+                expectedChainId: referralChainId, actualChainId: block.chainid
+            });
+        }
+
+        // Stranding-vs-bridgeable check: verify that NO registered sucker for the fee project peers to
+        // `referralChainId`. If even one does, the credit is BRIDGEABLE and the caller must use
+        // `bridgeRemote` (which routes value to the rightful referrer on `referralChainId`) instead of
+        // destroying it. We iterate the project's suckers because the registry doesn't index by peerChainId
+        // and the count is bounded (typically << 10 — one per destination chain).
+        address[] memory suckers = SUCKER_REGISTRY.suckersOf(FEE_PROJECT_ID);
+        uint256 suckerCount = suckers.length;
+        for (uint256 i; i < suckerCount;) {
+            uint256 peer = IJBSucker(suckers[i]).peerChainId();
+            if (peer == referralChainId) {
+                revert JBReferralSplitHook_SuckerExistsForChain({sucker: suckers[i], chainId: referralChainId});
+            }
+            unchecked {
+                ++i;
+            }
+        }
+
+        // The entitled delta is computed the same way `bridgeRemote` would — pro-rata against
+        // `feeVolumeByReferralOf` over `totalFeeVolumeOf`, minus what was already processed.
+        uint256 alreadyProcessed = bridgedOutOf[referralChainId][referralProjectId];
+        uint256 deltaToBurn = _pendingDeltaFor({
+            referralChainId: referralChainId, referralProjectId: referralProjectId, alreadyProcessed: alreadyProcessed
+        });
+        if (deltaToBurn == 0) return 0;
+
+        // Advance the HWM BEFORE the burn. `bridgedOutOf` is reused as a unified "processed" ledger so a
+        // future `bridgeRemote` call (if a sucker is later deployed) can only act on INCREMENTAL credit
+        // accumulated after this burn — the burned portion is gone for good. Reentrancy via the controller
+        // can't grow `delta` because `totalDeposited` and `feeVolumeByReferralOf` are monotonic.
+        unchecked {
+            bridgedOutOf[referralChainId][referralProjectId] = alreadyProcessed + deltaToBurn;
+        }
+
+        burned = deltaToBurn;
+
+        // Burn the equivalent fee-project tokens from this hook's balance. `holder == msg.sender == address(this)`,
+        // so JBController's permission check passes automatically (callers can always burn their own tokens).
+        IJBController(address(DIRECTORY.controllerOf(FEE_PROJECT_ID)))
+            .burnTokensOf({holder: address(this), projectId: FEE_PROJECT_ID, tokenCount: burned, memo: ""});
+
+        emit BurnedUnbridgeable({
+            referralChainId: referralChainId, referralProjectId: referralProjectId, amount: burned
         });
     }
 
