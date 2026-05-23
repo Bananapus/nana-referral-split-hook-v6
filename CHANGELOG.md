@@ -1,5 +1,50 @@
 # Changelog
 
+## 0.0.4
+
+Cross-chain settlement, burn-over-strand policy, defense-in-depth validation. Breaking ABI (new entrypoints, new errors, new events; rewritten `claimAndPush` semantics on the missing-twin path).
+
+### New entrypoints
+
+- **`burnUnbridgeableCreditFor(referralChainId, referralProjectId)`** — permissionless burn for cross-chain referral credits on chains with no sucker pair. Iterates `SUCKER_REGISTRY.suckersOf(FEE_PROJECT_ID)` and reverts with `JBReferralSplitHook_SuckerExistsForChain` if any registered sucker peers to `referralChainId` (preventing grief against bridgeable referrers). Otherwise advances `bridgedOutOf` (shared HWM with `bridgeRemote`) and burns the entitled fee-project tokens via `JBController.burnTokensOf`. The bridged terminal-token value already in the fee project's balance accrues pro-rata to existing fee-token holders.
+
+### Behavior changes
+
+- **`claimAndPush` now burns on missing local twin instead of stranding.** When `TOKENS.tokenOf(referralProjectId) == 0` on the destination chain, the freshly-minted fee-project tokens from `sucker.claim` are burned via `JBController.burnTokensOf`. Previously they sat in the hook's balance forever (the leaf is single-use, so they could never be forwarded). The bridged terminal-token value still lands in the fee project's balance — burning the offsetting supply turns it into pro-rata surplus for existing fee-token holders.
+
+### Defense-in-depth
+
+- **`bridgeRemote` and `claimAndPush` reject `chainId == 0`** with `JBReferralSplitHook_ZeroChainId`. EIP-155 chain IDs are strictly positive; downstream sucker checks would catch this anyway, but failing here gives a clearer error and removes load-bearing dependence on downstream behavior.
+
+### New errors
+
+- `JBReferralSplitHook_ZeroChainId` — emitted when `chainId == 0` is passed to `bridgeRemote`, `claimAndPush`, or `burnUnbridgeableCreditFor`.
+- `JBReferralSplitHook_SuckerExistsForChain(sucker, chainId)` — emitted when `burnUnbridgeableCreditFor` is called for a chain that has a registered sucker (use `bridgeRemote` instead).
+
+### New events
+
+- `BurnedOnStrand(originChainId, referralProjectId, feeProjectBurned)` — emitted by `claimAndPush` when the local twin's IJBToken doesn't exist and the freshly-minted fee-project tokens are burned.
+- `BurnedUnbridgeable(referralChainId, referralProjectId, amount)` — emitted by `burnUnbridgeableCreditFor` when an unbridgeable credit is burned.
+
+### Design rule (the burn-over-strand matrix)
+
+| Scenario | Policy |
+| --- | --- |
+| `pushTo` same-chain, no ERC-20 | Defer (roll back HWM, recoverable when project tokenizes) |
+| `bridgeRemote`, no sucker for chain | Revert (caller error or wrong-chain assertion); caller should use `burnUnbridgeableCreditFor` |
+| `burnUnbridgeableCreditFor`, sucker exists | Revert (grief prevention) |
+| `burnUnbridgeableCreditFor`, no sucker | Burn |
+| `claimAndPush`, missing local twin | Burn (leaf already consumed, no recipient) |
+| Any malformed args | Revert |
+
+### Imports
+
+- Adds `IJBController` import for `burnTokensOf`. `holder == msg.sender == hook` makes the burn self-authorized; no `BURN_TOKENS` permission grant is needed.
+
+### Tests
+
+The cross-chain end-to-end test suite (in `deploy-all-v6/test/fork/ReferralRewardCrossChainFork.t.sol`) grew from 19 to 28 tests, including the new burn paths (`test_claimAndPush_localTwinHasNoToken_burnsToFeeProjectSurplus`, `test_unbridgeableChain_burnsUnbridgeableCredit`, `test_burnUnbridgeable_revertsWhenSuckerExists`, `test_burnUnbridgeable_thenLaterSuckerDeployment_bridgesIncrementalOnly`), USDC mixed-currency tests (`test_usdc_sameChain_endToEnd`, `test_usdc_mixedCurrency_volumeLedgerStaysCoherent`), and chainId=0 input-validation tests. Hook's own unit tests (16) unchanged.
+
 ## 0.0.3
 
 Storage and naming clarifications. Breaking ABI.

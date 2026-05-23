@@ -88,6 +88,29 @@ interface IJBReferralSplitHook is IJBSplitHook {
         uint256 pushed
     );
 
+    /// @notice Emitted when a bridged claim lands but the local twin has no `IJBToken`, so the freshly-minted
+    /// fee-project tokens are burned rather than stranded in the hook. The bridged terminal tokens were
+    /// already deposited to the fee project's balance by the sucker, so burning the freshly-minted supply
+    /// preserves all existing fee-token holders' pro-rata claim on that newly-arrived value.
+    /// @param originChainId The chain the credit was originally earned on.
+    /// @param referralProjectId The local twin's project ID on this chain (had no IJBToken).
+    /// @param feeProjectBurned The number of fee-project tokens burned (== the amount that would have been
+    /// pushed to the distributor had a local twin existed).
+    event BurnedOnStrand(
+        uint256 indexed originChainId, uint256 indexed referralProjectId, uint256 feeProjectBurned
+    );
+
+    /// @notice Emitted when an accumulated cross-chain referral credit was burned because no sucker exists
+    /// for the credited chain. The bridged terminal-token value never actually moved — the credit was sitting
+    /// idle in the hook's pro-rata pool — so burning the fee-project tokens directly cancels the accumulated
+    /// allocation and returns the surplus to existing fee-token holders.
+    /// @dev Advances `bridgedOutOf[chainId][projectId]` by `amount` so the burn is idempotent and so that a
+    /// future sucker deployment for `chainId` can only `bridgeRemote` INCREMENTAL credit accumulated AFTER
+    /// the burn — the burned portion is permanently irrecoverable for the credited referrer (by design).
+    event BurnedUnbridgeable(
+        uint256 indexed referralChainId, uint256 indexed referralProjectId, uint256 amount
+    );
+
     /// @notice Emitted when `pushTo` or `bridgeRemote` no-ops for an observable reason.
     /// @param referralChainId The referrer's home chain ID.
     /// @param referralProjectId The referring project whose action was skipped.
@@ -110,6 +133,13 @@ interface IJBReferralSplitHook is IJBSplitHook {
     error JBReferralSplitHook_OriginIsLocal(uint256 chainId);
     error JBReferralSplitHook_ChainIdTooLarge(uint256 chainId);
     error JBReferralSplitHook_ReferralProjectIdTooLarge(uint256 referralProjectId);
+    /// @notice Defense-in-depth: rejected early so a caller can never accidentally route bridges to "chain 0"
+    /// (an invalid EIP-155 chain id) — downstream sucker checks would catch this anyway, but failing here
+    /// gives a clearer error and removes any reliance on downstream behavior.
+    error JBReferralSplitHook_ZeroChainId();
+    /// @notice `burnUnbridgeableCreditFor` rejected because a sucker DOES exist for the asserted chain — the
+    /// credit is bridgeable, not stranded, so the caller must use `bridgeRemote` instead.
+    error JBReferralSplitHook_SuckerExistsForChain(address sucker, uint256 chainId);
 
     //*********************************************************************//
     // --------------------------- view methods -------------------------- //
@@ -221,6 +251,30 @@ interface IJBReferralSplitHook is IJBSplitHook {
     )
         external
         returns (uint256 pushed);
+
+    /// @notice Burn the accumulated cross-chain referral credit for `(referralChainId, referralProjectId)`
+    /// when NO sucker pair for the fee project peers to `referralChainId` — i.e. the credit is unbridgeable.
+    /// @dev Permissionless. Burning here means: the entitled fee-project tokens for this referrer pair are
+    /// removed from supply, returning the bridged terminal-token value (already in the fee project's balance
+    /// from the original protocol-fee flow) to all existing fee-token holders pro-rata. This is the
+    /// cross-chain analog of `claimAndPush`'s burn-on-strand path. Reverts with `SuckerExistsForChain` if
+    /// any registered sucker for the fee project peers to `referralChainId` — in that case the caller MUST
+    /// use `bridgeRemote` instead so the rightful referrer is settled. Reverts on the usual malformed-args
+    /// cases (`projectId == 0 || projectId == FEE_PROJECT_ID`, `chainId == 0`, `chainId == block.chainid`).
+    /// Skips (without reverting) when there's nothing to burn (no recorded volume, or the high-water mark is
+    /// already caught up). Advances `bridgedOutOf` by the burned amount so the burn is idempotent AND so a
+    /// future sucker deployment for `referralChainId` can only bridge INCREMENTAL credit accumulated after
+    /// the burn — the burned portion stays burned.
+    /// @param referralChainId The referrer's home EIP-155 chain ID. Must NOT equal `block.chainid`. Must NOT
+    /// have a sucker pair on the fee project.
+    /// @param referralProjectId The referring project on that chain.
+    /// @return burned The number of fee-project tokens burned (0 on skip).
+    function burnUnbridgeableCreditFor(
+        uint256 referralChainId,
+        uint256 referralProjectId
+    )
+        external
+        returns (uint256 burned);
 
     /// @notice Pack `(originChainId, referralProjectId)` into the `bytes32 metadata` payload carried by the sucker
     /// leaf. Pure helper so off-chain integrations and tests can derive the value identically.
