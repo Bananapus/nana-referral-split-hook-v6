@@ -96,9 +96,7 @@ interface IJBReferralSplitHook is IJBSplitHook {
     /// @param referralProjectId The local twin's project ID on this chain (had no IJBToken).
     /// @param feeProjectBurned The number of fee-project tokens burned (== the amount that would have been
     /// pushed to the distributor had a local twin existed).
-    event BurnedOnStrand(
-        uint256 indexed originChainId, uint256 indexed referralProjectId, uint256 feeProjectBurned
-    );
+    event BurnedOnStrand(uint256 indexed originChainId, uint256 indexed referralProjectId, uint256 feeProjectBurned);
 
     /// @notice Emitted when an accumulated cross-chain referral credit was burned because no sucker exists
     /// for the credited chain. The bridged terminal-token value never actually moved — the credit was sitting
@@ -107,9 +105,7 @@ interface IJBReferralSplitHook is IJBSplitHook {
     /// @dev Advances `bridgedOutOf[chainId][projectId]` by `amount` so the burn is idempotent and so that a
     /// future sucker deployment for `chainId` can only `bridgeRemote` INCREMENTAL credit accumulated AFTER
     /// the burn — the burned portion is permanently irrecoverable for the credited referrer (by design).
-    event BurnedUnbridgeable(
-        uint256 indexed referralChainId, uint256 indexed referralProjectId, uint256 amount
-    );
+    event BurnedUnbridgeable(uint256 indexed referralChainId, uint256 indexed referralProjectId, uint256 amount);
 
     /// @notice Emitted when `pushTo` or `bridgeRemote` no-ops for an observable reason.
     /// @param referralChainId The referrer's home chain ID.

@@ -399,9 +399,7 @@ contract JBReferralSplitHook is ERC165, IJBReferralSplitHook {
                     feeProjectBurned: feeProjectMinted
                 });
             } else {
-                emit Skipped({
-                    referralChainId: block.chainid, referralProjectId: referralProjectId, reason: "no token"
-                });
+                emit Skipped({referralChainId: block.chainid, referralProjectId: referralProjectId, reason: "no token"});
             }
             emit ClaimedRemote({
                 originChainId: originChainId,
@@ -473,9 +471,7 @@ contract JBReferralSplitHook is ERC165, IJBReferralSplitHook {
         // `feeVolumeByReferralOf` over `totalFeeVolumeOf`, minus what was already processed.
         uint256 alreadyProcessed = bridgedOutOf[referralChainId][referralProjectId];
         uint256 deltaToBurn = _pendingDeltaFor({
-            referralChainId: referralChainId,
-            referralProjectId: referralProjectId,
-            alreadyProcessed: alreadyProcessed
+            referralChainId: referralChainId, referralProjectId: referralProjectId, alreadyProcessed: alreadyProcessed
         });
         if (deltaToBurn == 0) return 0;
 
