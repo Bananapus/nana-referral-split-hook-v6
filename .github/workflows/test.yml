@@ -1,0 +1,37 @@
+name: test
+on:
+  pull_request:
+    branches:
+      - main
+  push:
+    branches:
+      - main
+jobs:
+  forge-test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 25.9.0
+      - name: Install npm dependencies
+        run: npm install --omit=dev
+      - name: Install Foundry
+        uses: foundry-rs/foundry-toolchain@v1
+        with:
+          cache: false
+      - name: Run tests
+        run: forge test --deny notes --fail-fast --summary --detailed --skip "*/script/**"
+        env:
+          RPC_ETHEREUM_SEPOLIA: ${{ secrets.RPC_ETHEREUM_SEPOLIA }}
+          RPC_ARBITRUM_SEPOLIA: ${{ secrets.RPC_ARBITRUM_SEPOLIA }}
+          RPC_ETHEREUM_MAINNET: ${{ secrets.RPC_ETHEREUM_MAINNET }}
+          RPC_ARBITRUM_MAINNET: ${{ secrets.RPC_ARBITRUM_MAINNET }}
+          RPC_OPTIMISM_MAINNET: ${{ secrets.RPC_OPTIMISM_MAINNET }}
+          RPC_BASE_MAINNET: ${{ secrets.RPC_BASE_MAINNET }}
+          RPC_CELO_MAINNET: ${{ secrets.RPC_CELO_MAINNET }}
+          RPC_TEMPO_MAINNET: ${{ secrets.RPC_TEMPO_MAINNET }}
+      - name: Check contract sizes
+        run: forge build --deny notes --sizes --skip "*/test/**" --skip "*/script/**" --skip SphinxUtils
