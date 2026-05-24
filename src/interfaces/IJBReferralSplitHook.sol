@@ -40,18 +40,21 @@ interface IJBReferralSplitHook is IJBSplitHook {
     /// @notice Emitted when reserved tokens are received from the fee project's split distribution.
     /// @param amount The number of tokens received in this `processSplitWith` call.
     /// @param newTotalDeposited The new value of `totalDeposited` after this deposit.
-    event Deposit(uint256 amount, uint256 newTotalDeposited);
+    /// @param caller The address that called the hook.
+    event Deposit(uint256 amount, uint256 newTotalDeposited, address caller);
 
     /// @notice Emitted when a same-chain referring project's accrued share is forwarded to the distributor.
     /// @param referralChainId The referrer's home chain ID (always `block.chainid` for this event).
     /// @param referralProjectId The referring project credited.
     /// @param referralToken The referring project's IVotes token (the distributor `hook` key).
     /// @param amount The number of fee-project tokens forwarded.
+    /// @param caller The address that pushed the share.
     event Push(
         uint256 indexed referralChainId,
         uint256 indexed referralProjectId,
         address indexed referralToken,
-        uint256 amount
+        uint256 amount,
+        address caller
     );
 
     /// @notice Emitted when a cross-chain referrer's accrued share is bridged via the fee project's sucker.
@@ -62,13 +65,15 @@ interface IJBReferralSplitHook is IJBSplitHook {
     /// @param amount The number of fee-project tokens cashed out into the sucker.
     /// @param leafMetadata The `bytes32 metadata` payload written into the sucker leaf for atomic destination
     /// settlement.
+    /// @param caller The address that bridged the remote share.
     event BridgedRemote(
         uint256 indexed referralChainId,
         uint256 indexed referralProjectId,
         IJBSucker sucker,
         address terminalToken,
         uint256 amount,
-        bytes32 leafMetadata
+        bytes32 leafMetadata,
+        address caller
     );
 
     /// @notice Emitted when a bridged claim is settled on the referrer's home chain: tokens are claimed from the
@@ -79,13 +84,15 @@ interface IJBReferralSplitHook is IJBSplitHook {
     /// @param terminalReceived The amount of terminal tokens received from the sucker.
     /// @param feeProjectMinted The amount of fee-project tokens minted by paying the local fee project.
     /// @param pushed The amount actually forwarded to the distributor.
+    /// @param caller The address that settled the bridged claim.
     event ClaimedRemote(
         uint256 indexed originChainId,
         uint256 indexed referralProjectId,
         address indexed terminalToken,
         uint256 terminalReceived,
         uint256 feeProjectMinted,
-        uint256 pushed
+        uint256 pushed,
+        address caller
     );
 
     /// @notice Emitted when a bridged claim lands but the local twin has no `IJBToken`, so the freshly-minted
@@ -96,7 +103,10 @@ interface IJBReferralSplitHook is IJBSplitHook {
     /// @param referralProjectId The local twin's project ID on this chain (had no IJBToken).
     /// @param feeProjectBurned The number of fee-project tokens burned (== the amount that would have been
     /// pushed to the distributor had a local twin existed).
-    event BurnedOnStrand(uint256 indexed originChainId, uint256 indexed referralProjectId, uint256 feeProjectBurned);
+    /// @param caller The address that settled the bridged claim.
+    event BurnedOnStrand(
+        uint256 indexed originChainId, uint256 indexed referralProjectId, uint256 feeProjectBurned, address caller
+    );
 
     /// @notice Emitted when an accumulated cross-chain referral credit was burned because no sucker exists
     /// for the credited chain. The bridged terminal-token value never actually moved — the credit was sitting
@@ -105,13 +115,17 @@ interface IJBReferralSplitHook is IJBSplitHook {
     /// @dev Advances `bridgedOutOf[chainId][projectId]` by `amount` so the burn is idempotent and so that a
     /// future sucker deployment for `chainId` can only `bridgeRemote` INCREMENTAL credit accumulated AFTER
     /// the burn — the burned portion is permanently irrecoverable for the credited referrer (by design).
-    event BurnedUnbridgeable(uint256 indexed referralChainId, uint256 indexed referralProjectId, uint256 amount);
+    /// @param caller The address that burned the unbridgeable credit.
+    event BurnedUnbridgeable(
+        uint256 indexed referralChainId, uint256 indexed referralProjectId, uint256 amount, address caller
+    );
 
     /// @notice Emitted when `pushTo` or `bridgeRemote` no-ops for an observable reason.
     /// @param referralChainId The referrer's home chain ID.
     /// @param referralProjectId The referring project whose action was skipped.
     /// @param reason A short, indexed code (e.g. `"no token"`, `"no volume"`, `"caught up"`, `"no sucker"`).
-    event Skipped(uint256 indexed referralChainId, uint256 indexed referralProjectId, bytes32 reason);
+    /// @param caller The address that triggered the skipped action.
+    event Skipped(uint256 indexed referralChainId, uint256 indexed referralProjectId, bytes32 reason, address caller);
 
     //*********************************************************************//
     // ------------------------------ errors ------------------------------ //

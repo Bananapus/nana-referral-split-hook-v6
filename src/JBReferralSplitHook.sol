@@ -168,7 +168,7 @@ contract JBReferralSplitHook is ERC165, IJBReferralSplitHook {
             totalDeposited += context.amount;
         }
 
-        emit Deposit({amount: context.amount, newTotalDeposited: totalDeposited});
+        emit Deposit({amount: context.amount, newTotalDeposited: totalDeposited, caller: msg.sender});
     }
 
     /// @inheritdoc IJBReferralSplitHook
@@ -185,7 +185,12 @@ contract JBReferralSplitHook is ERC165, IJBReferralSplitHook {
         // projectId; for any other chain it identifies a project in that chain's registry and we must not
         // attempt a local lookup with it.
         if (referralChainId != block.chainid) {
-            emit Skipped({referralChainId: referralChainId, referralProjectId: referralProjectId, reason: "remote"});
+            emit Skipped({
+                referralChainId: referralChainId,
+                referralProjectId: referralProjectId,
+                reason: "remote",
+                caller: msg.sender
+            });
             return 0;
         }
 
@@ -206,7 +211,12 @@ contract JBReferralSplitHook is ERC165, IJBReferralSplitHook {
         IJBToken refToken = TOKENS.tokenOf(referralProjectId);
         if (address(refToken) == address(0)) {
             pushedLocallyOf[referralProjectId] = alreadyPushed;
-            emit Skipped({referralChainId: referralChainId, referralProjectId: referralProjectId, reason: "no token"});
+            emit Skipped({
+                referralChainId: referralChainId,
+                referralProjectId: referralProjectId,
+                reason: "no token",
+                caller: msg.sender
+            });
             return 0;
         }
 
@@ -217,7 +227,8 @@ contract JBReferralSplitHook is ERC165, IJBReferralSplitHook {
             referralChainId: referralChainId,
             referralProjectId: referralProjectId,
             referralToken: address(refToken),
-            amount: pushed
+            amount: pushed,
+            caller: msg.sender
         });
     }
 
@@ -310,7 +321,8 @@ contract JBReferralSplitHook is ERC165, IJBReferralSplitHook {
             sucker: sucker,
             terminalToken: terminalToken,
             amount: bridged,
-            leafMetadata: leafMetadata
+            leafMetadata: leafMetadata,
+            caller: msg.sender
         });
     }
 
@@ -396,10 +408,16 @@ contract JBReferralSplitHook is ERC165, IJBReferralSplitHook {
                 emit BurnedOnStrand({
                     originChainId: originChainId,
                     referralProjectId: referralProjectId,
-                    feeProjectBurned: feeProjectMinted
+                    feeProjectBurned: feeProjectMinted,
+                    caller: msg.sender
                 });
             } else {
-                emit Skipped({referralChainId: block.chainid, referralProjectId: referralProjectId, reason: "no token"});
+                emit Skipped({
+                    referralChainId: block.chainid,
+                    referralProjectId: referralProjectId,
+                    reason: "no token",
+                    caller: msg.sender
+                });
             }
             emit ClaimedRemote({
                 originChainId: originChainId,
@@ -407,7 +425,8 @@ contract JBReferralSplitHook is ERC165, IJBReferralSplitHook {
                 terminalToken: claimData.token,
                 terminalReceived: claimData.leaf.terminalTokenAmount,
                 feeProjectMinted: feeProjectMinted,
-                pushed: 0
+                pushed: 0,
+                caller: msg.sender
             });
             return 0;
         }
@@ -423,7 +442,8 @@ contract JBReferralSplitHook is ERC165, IJBReferralSplitHook {
             terminalToken: claimData.token,
             terminalReceived: claimData.leaf.terminalTokenAmount,
             feeProjectMinted: feeProjectMinted,
-            pushed: pushed
+            pushed: pushed,
+            caller: msg.sender
         });
     }
 
@@ -491,7 +511,7 @@ contract JBReferralSplitHook is ERC165, IJBReferralSplitHook {
             .burnTokensOf({holder: address(this), projectId: FEE_PROJECT_ID, tokenCount: burned, memo: ""});
 
         emit BurnedUnbridgeable({
-            referralChainId: referralChainId, referralProjectId: referralProjectId, amount: burned
+            referralChainId: referralChainId, referralProjectId: referralProjectId, amount: burned, caller: msg.sender
         });
     }
 
@@ -530,7 +550,12 @@ contract JBReferralSplitHook is ERC165, IJBReferralSplitHook {
     {
         uint256 totalVol = STORE.totalFeeVolumeOf(TERMINAL);
         if (totalVol == 0) {
-            emit Skipped({referralChainId: referralChainId, referralProjectId: referralProjectId, reason: "no volume"});
+            emit Skipped({
+                referralChainId: referralChainId,
+                referralProjectId: referralProjectId,
+                reason: "no volume",
+                caller: msg.sender
+            });
             return 0;
         }
 
@@ -538,13 +563,23 @@ contract JBReferralSplitHook is ERC165, IJBReferralSplitHook {
             terminal: TERMINAL, referralChainId: referralChainId, referralProjectId: referralProjectId
         });
         if (refVol == 0) {
-            emit Skipped({referralChainId: referralChainId, referralProjectId: referralProjectId, reason: "no volume"});
+            emit Skipped({
+                referralChainId: referralChainId,
+                referralProjectId: referralProjectId,
+                reason: "no volume",
+                caller: msg.sender
+            });
             return 0;
         }
 
         uint256 entitled = mulDiv(totalDeposited, refVol, totalVol);
         if (entitled <= alreadyProcessed) {
-            emit Skipped({referralChainId: referralChainId, referralProjectId: referralProjectId, reason: "caught up"});
+            emit Skipped({
+                referralChainId: referralChainId,
+                referralProjectId: referralProjectId,
+                reason: "caught up",
+                caller: msg.sender
+            });
             return 0;
         }
 
