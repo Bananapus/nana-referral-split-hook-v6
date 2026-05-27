@@ -37,6 +37,87 @@ contract JBReferralSplitHook is ERC165, IJBReferralSplitHook {
     using SafeERC20 for IERC20;
 
     //*********************************************************************//
+    // --------------------------- custom errors ------------------------- //
+    //*********************************************************************//
+
+    /// @notice `packLeafMetadata` rejected an `originChainId` larger than `type(uint32).max` so the high bits
+    /// of the packed metadata can never silently bleed into the `referralProjectId` field.
+    error JBReferralSplitHook_ChainIdTooLarge(uint256 chainId);
+
+    /// @notice `claimAndPush` was called with claim data whose re-derived leaf hash doesn't match the hash
+    /// the sucker committed at execution time. Indicates a fabricated `claimData` trying to redirect
+    /// settlement of a real leaf to a different (attacker-controlled) referrer.
+    error JBReferralSplitHook_FrontRunLeafMismatch(bytes32 expected, bytes32 stored);
+
+    /// @notice Caller passed `referralProjectId == 0` or `referralProjectId == FEE_PROJECT_ID` — both are
+    /// sentinel/self-reference values that can't legitimately identify a referrer.
+    error JBReferralSplitHook_InvalidReferralProjectId();
+
+    /// @notice `claimAndPush` rejected because this exact `(sucker, terminalToken, leafIndex)` has already
+    /// been settled by this hook. Prevents double-settle across the normal `sucker.claim` path AND the
+    /// front-run path (where an external caller consumed the leaf before us).
+    error JBReferralSplitHook_LeafAlreadySettled(address sucker, address terminalToken, uint256 leafIndex);
+
+    /// @notice `claimAndPush` rejected because the leaf's `beneficiary` is not this hook. The sucker's
+    /// merkle proof would catch a tampered leaf, but checking the beneficiary explicitly catches a
+    /// mismatched-claim-data call before we touch state.
+    error JBReferralSplitHook_LeafBeneficiaryMismatch(bytes32 expected, bytes32 got);
+
+    /// @notice `claimAndPush` rejected because the leaf's `metadata` doesn't match the asserted
+    /// `(originChainId, referralProjectId)` pair. Stops a caller from substituting the projectId argument
+    /// and redirecting bridged tokens to a different local distributor.
+    error JBReferralSplitHook_LeafMetadataMismatch(bytes32 expected, bytes32 got);
+
+    /// @notice `bridgeRemote` / `claimAndPush` rejected because the supplied sucker is not registered for
+    /// the fee project. Prevents routing value into an unregistered sucker that doesn't lead to the right
+    /// remote chain (or anywhere at all).
+    error JBReferralSplitHook_NotASucker(address sucker);
+
+    /// @notice `claimAndPush` rejected because the leaf's `originChainId` equals `block.chainid`. Bridged
+    /// claims must come from a different chain; same-chain settlement happens via `pushTo`.
+    error JBReferralSplitHook_OriginIsLocal(uint256 chainId);
+
+    /// @notice `packLeafMetadata` rejected a `referralProjectId` larger than `type(uint64).max` so the high
+    /// bits of the packed metadata can never silently bleed into the reserved upper region.
+    error JBReferralSplitHook_ReferralProjectIdTooLarge(uint256 referralProjectId);
+
+    /// @notice `burnUnbridgeableCreditFor` rejected because a sucker (active OR deprecated) DOES exist for
+    /// the asserted chain — the credit is bridgeable, not stranded, so the caller must use `bridgeRemote`
+    /// instead of destroying it.
+    error JBReferralSplitHook_SuckerExistsForChain(address sucker, uint256 chainId);
+
+    /// @notice `bridgeRemote` rejected because the sucker is not in the `ENABLED` state. Deprecated suckers
+    /// (DEPRECATION_PENDING / SENDING_DISABLED / DEPRECATED) keep `isSuckerOf` true so pending claims can
+    /// settle, but they must not accept new bridges.
+    error JBReferralSplitHook_SuckerNotEnabled(address sucker, JBSuckerState state);
+
+    /// @notice `bridgeRemote` rejected because the sucker's `peerChainId()` doesn't equal the asserted
+    /// `referralChainId`. Routing a referrer's credit through the wrong omnichain leg would land it on the
+    /// wrong remote chain.
+    error JBReferralSplitHook_SuckerPeerMismatch(uint256 expectedPeerChainId, uint256 actualPeerChainId);
+
+    /// @notice `processSplitWith` rejected because the `context.token` doesn't match the fee project's
+    /// project token. Reserved-token splits never carry native ETH; we always expect the fee project's
+    /// ERC-20 here.
+    error JBReferralSplitHook_TokenMismatch(address expected, address got);
+
+    /// @notice `processSplitWith` rejected because `msg.sender` isn't the fee project's controller.
+    error JBReferralSplitHook_Unauthorized(uint256 projectId, address caller);
+
+    /// @notice `bridgeRemote` / `burnUnbridgeableCreditFor` rejected because the asserted `referralChainId`
+    /// equals `block.chainid` — i.e. it's a same-chain operation that should use `pushTo` instead.
+    error JBReferralSplitHook_WrongBridgeTarget(uint256 expectedChainId, uint256 actualChainId);
+
+    /// @notice `processSplitWith` rejected because `context.projectId` doesn't equal `FEE_PROJECT_ID`. Only
+    /// the fee project's reserved-token distribution may fund this hook.
+    error JBReferralSplitHook_WrongProject(uint256 expected, uint256 got);
+
+    /// @notice Defense-in-depth: rejected early so a caller can never accidentally route bridges to
+    /// "chain 0" (an invalid EIP-155 chain id) — downstream sucker checks would catch this anyway, but
+    /// failing here gives a clearer error and removes any reliance on downstream behavior.
+    error JBReferralSplitHook_ZeroChainId();
+
+    //*********************************************************************//
     // ----------------- public immutable stored properties ---------------- //
     //*********************************************************************//
 
