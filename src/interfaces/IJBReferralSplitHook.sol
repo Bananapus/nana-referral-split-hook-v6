@@ -6,6 +6,7 @@ import {IJBSplitHook} from "@bananapus/core-v6/src/interfaces/IJBSplitHook.sol";
 import {IJBTerminalStore} from "@bananapus/core-v6/src/interfaces/IJBTerminalStore.sol";
 import {IJBTokens} from "@bananapus/core-v6/src/interfaces/IJBTokens.sol";
 import {IJBDistributor} from "@bananapus/distributor-v6/src/interfaces/IJBDistributor.sol";
+import {JBSuckerState} from "@bananapus/suckers-v6/src/enums/JBSuckerState.sol";
 import {IJBSucker} from "@bananapus/suckers-v6/src/interfaces/IJBSucker.sol";
 import {IJBSuckerRegistry} from "@bananapus/suckers-v6/src/interfaces/IJBSuckerRegistry.sol";
 import {JBClaim} from "@bananapus/suckers-v6/src/structs/JBClaim.sol";
@@ -40,18 +41,21 @@ interface IJBReferralSplitHook is IJBSplitHook {
     /// @notice Emitted when reserved tokens are received from the fee project's split distribution.
     /// @param amount The number of tokens received in this `processSplitWith` call.
     /// @param newTotalDeposited The new value of `totalDeposited` after this deposit.
-    event Deposit(uint256 amount, uint256 newTotalDeposited);
+    /// @param caller The address that called the hook.
+    event Deposit(uint256 amount, uint256 newTotalDeposited, address caller);
 
     /// @notice Emitted when a same-chain referring project's accrued share is forwarded to the distributor.
     /// @param referralChainId The referrer's home chain ID (always `block.chainid` for this event).
     /// @param referralProjectId The referring project credited.
     /// @param referralToken The referring project's IVotes token (the distributor `hook` key).
     /// @param amount The number of fee-project tokens forwarded.
+    /// @param caller The address that pushed the share.
     event Push(
         uint256 indexed referralChainId,
         uint256 indexed referralProjectId,
         address indexed referralToken,
-        uint256 amount
+        uint256 amount,
+        address caller
     );
 
     /// @notice Emitted when a cross-chain referrer's accrued share is bridged via the fee project's sucker.
@@ -62,13 +66,15 @@ interface IJBReferralSplitHook is IJBSplitHook {
     /// @param amount The number of fee-project tokens cashed out into the sucker.
     /// @param leafMetadata The `bytes32 metadata` payload written into the sucker leaf for atomic destination
     /// settlement.
+    /// @param caller The address that bridged the remote share.
     event BridgedRemote(
         uint256 indexed referralChainId,
         uint256 indexed referralProjectId,
         IJBSucker sucker,
         address terminalToken,
         uint256 amount,
-        bytes32 leafMetadata
+        bytes32 leafMetadata,
+        address caller
     );
 
     /// @notice Emitted when a bridged claim is settled on the referrer's home chain: tokens are claimed from the
@@ -79,20 +85,65 @@ interface IJBReferralSplitHook is IJBSplitHook {
     /// @param terminalReceived The amount of terminal tokens received from the sucker.
     /// @param feeProjectMinted The amount of fee-project tokens minted by paying the local fee project.
     /// @param pushed The amount actually forwarded to the distributor.
+    /// @param caller The address that settled the bridged claim.
     event ClaimedRemote(
         uint256 indexed originChainId,
         uint256 indexed referralProjectId,
         address indexed terminalToken,
         uint256 terminalReceived,
         uint256 feeProjectMinted,
-        uint256 pushed
+        uint256 pushed,
+        address caller
+    );
+
+    /// @notice Emitted when a bridged claim lands but the local twin has no `IJBToken`, so the freshly-minted
+    /// fee-project tokens are burned rather than stranded in the hook. The bridged terminal tokens were
+    /// already deposited to the fee project's balance by the sucker, so burning the freshly-minted supply
+    /// preserves all existing fee-token holders' pro-rata claim on that newly-arrived value.
+    /// @param originChainId The chain the credit was originally earned on.
+    /// @param referralProjectId The local twin's project ID on this chain (had no IJBToken).
+    /// @param feeProjectBurned The number of fee-project tokens burned (== the amount that would have been
+    /// pushed to the distributor had a local twin existed).
+    /// @param caller The address that settled the bridged claim.
+    event BurnedOnStrand(
+        uint256 indexed originChainId, uint256 indexed referralProjectId, uint256 feeProjectBurned, address caller
+    );
+
+    /// @notice Emitted when an accumulated cross-chain referral credit was burned because no sucker exists
+    /// for the credited chain. The bridged terminal-token value never actually moved — the credit was sitting
+    /// idle in the hook's pro-rata pool — so burning the fee-project tokens directly cancels the accumulated
+    /// allocation and returns the surplus to existing fee-token holders.
+    /// @dev Advances `bridgedOutOf[chainId][projectId]` by `amount` so the burn is idempotent and so that a
+    /// future sucker deployment for `chainId` can only `bridgeRemote` INCREMENTAL credit accumulated AFTER
+    /// the burn — the burned portion is permanently irrecoverable for the credited referrer (by design).
+    /// @param caller The address that burned the unbridgeable credit.
+    event BurnedUnbridgeable(
+        uint256 indexed referralChainId, uint256 indexed referralProjectId, uint256 amount, address caller
+    );
+
+    /// @notice Emitted when `claimAndPush` settled via the front-run path: an external caller already invoked
+    /// `sucker.claim` for this leaf, so the freshly-minted fee-project tokens were already in this hook's
+    /// balance. We re-derived the leaf hash from the caller's claim data, matched against the hash the sucker
+    /// committed at execution time, and proceeded with settlement.
+    /// @param originChainId The chain the credit was originally earned on.
+    /// @param referralProjectId The local twin's project ID on this chain.
+    /// @param leafIndex The leaf index in the sucker's inbox tree.
+    /// @param feeProjectMinted The amount of fee-project tokens being settled (== the leaf's `projectTokenCount`).
+    /// @param caller The address that triggered the `claimAndPush` call.
+    event ClaimedFromFrontRun(
+        uint256 indexed originChainId,
+        uint256 indexed referralProjectId,
+        uint256 indexed leafIndex,
+        uint256 feeProjectMinted,
+        address caller
     );
 
     /// @notice Emitted when `pushTo` or `bridgeRemote` no-ops for an observable reason.
     /// @param referralChainId The referrer's home chain ID.
     /// @param referralProjectId The referring project whose action was skipped.
     /// @param reason A short, indexed code (e.g. `"no token"`, `"no volume"`, `"caught up"`, `"no sucker"`).
-    event Skipped(uint256 indexed referralChainId, uint256 indexed referralProjectId, bytes32 reason);
+    /// @param caller The address that triggered the skipped action.
+    event Skipped(uint256 indexed referralChainId, uint256 indexed referralProjectId, bytes32 reason, address caller);
 
     //*********************************************************************//
     // ------------------------------ errors ------------------------------ //
@@ -110,6 +161,25 @@ interface IJBReferralSplitHook is IJBSplitHook {
     error JBReferralSplitHook_OriginIsLocal(uint256 chainId);
     error JBReferralSplitHook_ChainIdTooLarge(uint256 chainId);
     error JBReferralSplitHook_ReferralProjectIdTooLarge(uint256 referralProjectId);
+    /// @notice Defense-in-depth: rejected early so a caller can never accidentally route bridges to "chain 0"
+    /// (an invalid EIP-155 chain id) — downstream sucker checks would catch this anyway, but failing here
+    /// gives a clearer error and removes any reliance on downstream behavior.
+    error JBReferralSplitHook_ZeroChainId();
+    /// @notice `burnUnbridgeableCreditFor` rejected because a sucker DOES exist for the asserted chain — the
+    /// credit is bridgeable, not stranded, so the caller must use `bridgeRemote` instead.
+    error JBReferralSplitHook_SuckerExistsForChain(address sucker, uint256 chainId);
+    /// @notice `claimAndPush` rejected because this exact `(sucker, terminalToken, leafIndex)` has already been
+    /// settled by this hook. Prevents double-settle across the normal `sucker.claim` path AND the front-run path
+    /// (where an external caller consumed the leaf before us).
+    error JBReferralSplitHook_LeafAlreadySettled(address sucker, address terminalToken, uint256 leafIndex);
+    /// @notice `claimAndPush` was called with claim data whose re-derived leaf hash doesn't match the hash the
+    /// sucker committed at execution time. Indicates a fabricated `claimData` trying to redirect settlement of
+    /// a real leaf to a different (attacker-controlled) referrer.
+    error JBReferralSplitHook_FrontRunLeafMismatch(bytes32 expected, bytes32 stored);
+    /// @notice `bridgeRemote` rejected because the sucker is not in the `ENABLED` state. Deprecated suckers
+    /// (DEPRECATION_PENDING / SENDING_DISABLED / DEPRECATED) keep `isSuckerOf` true so pending claims can
+    /// settle, but they must not accept new bridges.
+    error JBReferralSplitHook_SuckerNotEnabled(address sucker, JBSuckerState state);
 
     //*********************************************************************//
     // --------------------------- view methods -------------------------- //
@@ -161,6 +231,17 @@ interface IJBReferralSplitHook is IJBSplitHook {
     /// @return The cumulative amount bridged out for this pair.
     function bridgedOutOf(uint256 referralChainId, uint256 referralProjectId) external view returns (uint256);
 
+    /// @notice Whether this hook has already settled the leaf at `(sucker, terminalToken, leafIndex)`.
+    /// @dev Set inside `claimAndPush` after the leaf's tokens have been processed (either via the normal
+    /// `sucker.claim` path or via the front-run path). Subsequent calls with the same triple revert with
+    /// `JBReferralSplitHook_LeafAlreadySettled` so the hook can never double-process a single leaf even when
+    /// an external caller raced ahead of it.
+    /// @param sucker The sucker that produced the leaf.
+    /// @param terminalToken The terminal token of the leaf.
+    /// @param leafIndex The leaf index in the sucker's inbox tree.
+    /// @return Whether the leaf has already been settled.
+    function settledLeafOf(IJBSucker sucker, address terminalToken, uint256 leafIndex) external view returns (bool);
+
     //*********************************************************************//
     // -------------------------- external txs ---------------------------- //
     //*********************************************************************//
@@ -186,12 +267,17 @@ interface IJBReferralSplitHook is IJBSplitHook {
     /// @param referralProjectId The referring project on that chain.
     /// @param sucker The fee project's sucker pair to use; must bridge to `referralChainId` and be registered.
     /// @param terminalToken The terminal token to cash out into. Must be mapped on the sucker.
+    /// @param minTokensReclaimed The minimum acceptable amount of terminal tokens to receive from the sucker's
+    /// bonding-curve cash-out. Passes through to `sucker.prepare`. Callers MUST set this conservatively —
+    /// passing `0` leaves the cash-out leg fully exposed to MEV sandwich attacks. The hook is permissionless,
+    /// so the caller chooses their own slippage tolerance.
     /// @return bridged The number of fee-project tokens cashed out into the sucker (0 on skip).
     function bridgeRemote(
         uint256 referralChainId,
         uint256 referralProjectId,
         IJBSucker sucker,
-        address terminalToken
+        address terminalToken,
+        uint256 minTokensReclaimed
     )
         external
         returns (uint256 bridged);
@@ -221,6 +307,32 @@ interface IJBReferralSplitHook is IJBSplitHook {
     )
         external
         returns (uint256 pushed);
+
+    /// @notice Burn the accumulated cross-chain referral credit for `(referralChainId, referralProjectId)`
+    /// when NO sucker pair for the fee project peers to `referralChainId` — i.e. the credit is unbridgeable.
+    /// @dev Permissionless. Burning here means: the entitled fee-project tokens for this referrer pair are
+    /// removed from supply, returning the bridged terminal-token value (already in the fee project's balance
+    /// from the original protocol-fee flow) to all existing fee-token holders pro-rata. This is the
+    /// cross-chain analog of `claimAndPush`'s burn-on-strand path. Reverts with `SuckerExistsForChain` if any
+    /// sucker for the fee project — active OR deprecated — peers to `referralChainId` (iterates
+    /// `SUCKER_REGISTRY.allSuckersOf(FEE_PROJECT_ID)`, defensively `try/catch`ing `peerChainId()` so a fully
+    /// broken sucker can't permanently block burns of unrelated chains' credit). Deprecated suckers stay
+    /// settlement-eligible until they're truly removed, so credit routed through them is NOT stranded.
+    /// Reverts on the usual malformed-args cases (`projectId == 0 || projectId == FEE_PROJECT_ID`,
+    /// `chainId == 0`, `chainId == block.chainid`). Skips (without reverting) when there's nothing to burn
+    /// (no recorded volume, or the high-water mark is already caught up). Advances `bridgedOutOf` by the
+    /// burned amount so the burn is idempotent AND so a future sucker deployment for `referralChainId` can
+    /// only bridge INCREMENTAL credit accumulated after the burn — the burned portion stays burned.
+    /// @param referralChainId The referrer's home EIP-155 chain ID. Must NOT equal `block.chainid`. Must NOT
+    /// have a sucker pair on the fee project.
+    /// @param referralProjectId The referring project on that chain.
+    /// @return burned The number of fee-project tokens burned (0 on skip).
+    function burnUnbridgeableCreditFor(
+        uint256 referralChainId,
+        uint256 referralProjectId
+    )
+        external
+        returns (uint256 burned);
 
     /// @notice Pack `(originChainId, referralProjectId)` into the `bytes32 metadata` payload carried by the sucker
     /// leaf. Pure helper so off-chain integrations and tests can derive the value identically.

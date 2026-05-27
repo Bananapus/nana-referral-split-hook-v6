@@ -1,14 +1,12 @@
 {
   "name": "@bananapus/referral-split-hook-v6",
-  "version": "0.0.3",
+  "version": "0.0.7",
   "license": "MIT",
   "repository": {
     "type": "git",
     "url": "git+https://github.com/Bananapus/nana-referral-split-hook-v6"
   },
   "files": [
-    "CHANGELOG.md",
-    "foundry.lock",
     "foundry.toml",
     "references/",
     "remappings.txt",
@@ -26,10 +24,10 @@
     "deploy:testnets": "source ./.env && npx sphinx propose ./script/Deploy.s.sol --networks testnets"
   },
   "dependencies": {
-    "@bananapus/core-v6": "^0.0.59",
-    "@bananapus/distributor-v6": "^0.0.18",
-    "@bananapus/suckers-v6": "^0.0.50",
-    "@bananapus/permission-ids-v6": "^0.0.25",
+    "@bananapus/core-v6": "^0.0.60",
+    "@bananapus/distributor-v6": "^0.0.23",
+    "@bananapus/permission-ids-v6": "^0.0.27",
+    "@bananapus/suckers-v6": "^0.0.59",
     "@openzeppelin/contracts": "5.6.1",
     "@prb/math": "4.1.1"
   },
