@@ -56,6 +56,7 @@ This file covers `JBReferralSplitHook` — a single split-hook contract that fan
 - **Mixed-currency fee projects work because the store normalizes.** `JBTerminalStore._normalizeToNativeTokenUnits` converts USDC, USD, and other-currency fees into NATIVE_TOKEN 18-dec units in the volume ledger before the hook ever reads it.
 - **Fee-on-transfer tokens are unsupported on deposit.** `processSplitWith` records `context.amount`, not a `balanceOf` delta. A fee-on-transfer fee-project token would silently under-fund the hook.
 - **A referrer with no ERC-20 yet defers on same-chain.** `pushTo` rolls back the HWM. The share is recoverable when the referrer tokenizes. This is documented behavior, not a bug.
+- **Cross-chain projectId squatting on fresh destination chains.** `claimAndPush` resolves the referrer's local twin via `TOKENS.tokenOf(referralProjectId)` interpreted in the DESTINATION chain's project registry. If the legitimate referrer was project N on chain A, but on chain B project N was created by a different (potentially malicious) actor first, the credit lands at the wrong local twin. **Mitigation (deployment-level):** projects intending to be cross-chain referrers must launch on ALL destination chains in coordinated order, before any referral credit can accrue. The omnichain deployer enforces this for revnets via deterministic `_projectIdOf` pre-binding. Standalone projects without that infrastructure carry the risk. Not fixable at the hook layer — would require a cross-chain identity primitive.
 
 ## 6. Invariants To Verify
 
@@ -93,3 +94,38 @@ The hook tracks volume only for its constructor-set `TERMINAL`. Multi-terminal f
 ### 7.6 Burned credit cannot be unburned by future infrastructure
 
 Once `burnUnbridgeableCreditFor` advances `bridgedOutOf`, a sucker deployed later for that chain can only bridge INCREMENTAL credit. The burned portion is irrecoverable for the originally-credited referrer. This is the cost of preventing indefinite dilution; the policy chooses certainty over preserving every cent for an off-chain decision.
+
+## 8. Front-Run Protection For `claimAndPush`
+
+`sucker.claim(JBClaim)` is permissionless on the sucker — any third party with a valid merkle proof can call it. The leaf's `beneficiary` field is what binds the tokens to a destination (this hook), but the CALLER is unrestricted. Without explicit defense, a griefer could:
+
+1. Observe a pending `claimAndPush` call with valid claim data.
+2. Front-run by calling `sucker.claim(claimData)` directly.
+3. The sucker consumes the leaf and mints fee-project tokens to the hook (since the hook is the beneficiary).
+4. The hook's `claimAndPush` then reverts on its internal `sucker.claim` (leaf already executed).
+5. The freshly-minted fee-project tokens stay in the hook with NO attribution — `totalDeposited` was never updated, so no `pushTo`/`bridgeRemote`/`burnUnbridgeableCreditFor` call can settle them. **Permanent strand.**
+
+**The defense** lives in two coordinated changes:
+
+- **Sucker side**: `JBSucker._validate` now stores `keccak256(projectTokenCount || terminalTokenAmount || beneficiary || metadata)` per executed leaf in the public mapping `executedLeafHashOf[token][index]`. The hash is committed AFTER the bitmap set; both the bit and the slot are written before the merkle-root validation runs. In practice, an executed leaf has both the bitmap bit AND the stored hash; an unexecuted index has neither.
+- **Hook side**: `claimAndPush` queries `sucker.executedLeafHashOf(claimData.token, claimData.leaf.index)`. If non-zero, the leaf was already executed (by anyone). The hook re-derives the same hash from the caller's `claimData` and compares. A match authenticates that the caller's claim data corresponds to the actually-executed leaf — fake claim data with the same index but tampered fields produces a different hash and reverts on `JBReferralSplitHook_FrontRunLeafMismatch`. The hook then settles `feeProjectMinted = claimData.leaf.projectTokenCount` directly from the existing balance (no `sucker.claim` call needed).
+
+**Idempotency** is enforced by `settledLeafOf[sucker][token][index]`, written AFTER any external `sucker.claim` call. Re-attempting to settle the same leaf reverts with `JBReferralSplitHook_LeafAlreadySettled`. Stale-proof reverts on the normal path don't set the flag, so callers can retry with a fresh proof.
+
+**Why the bare bitmap was insufficient**: the bitmap proves "*some* leaf at index I was executed" — not "*which* leaf". The merkle proof cannot be re-validated by the hook later because `_inboxOf[token].root` is overwritten on each `fromRemote` message (no historical roots stored). The stored leaf hash is the minimum data the sucker can commit to let downstream consumers authenticate post-hoc settlement without trusting the caller's claim data at face value.
+
+### 8.1 Deprecated suckers are rejected in `bridgeRemote`
+
+`isSuckerOf` returns true for both `ENABLED` and deprecated suckers — the deprecated set retains registration so inbound claims can still settle. But OUTBOUND bridges from a deprecated sucker would revert deep inside `prepare` (after the hook has set its allowance) AND would muddy the ledger if it later races a freshly-deployed replacement. `bridgeRemote` now checks `sucker.state() == JBSuckerState.ENABLED` and reverts with `JBReferralSplitHook_SuckerNotEnabled` otherwise. `claimAndPush` deliberately does NOT add this check — settling a leaf that came from a now-deprecated sucker is exactly the legitimate "drain pending claims after deprecation" use case.
+
+### 8.2 `burnUnbridgeableCreditFor` iterates the FULL sucker set, not just active ones
+
+Previously the burn iterated `SUCKER_REGISTRY.suckersOf(FEE_PROJECT_ID)` which filters out deprecated entries. An attacker could exploit the window between `removeDeprecatedSucker` (for chain X) and a replacement deployment to permaburn credit that's still bridgeable via the deprecated sucker. The burn now iterates `allSuckersOf(FEE_PROJECT_ID)` (active + deprecated) and reverts on any peer match. A `try/catch` around `peerChainId()` lets a single fully-broken sucker not permanently block unrelated burns — its credit is genuinely stranded anyway.
+
+### 8.3 Approvals reset to zero after each external transfer
+
+Both `bridgeRemote` (approving the sucker for `prepare`) and `_fundDistributor` (approving the distributor for `fund`) now explicitly reset their `forceApprove` to zero after the pull. This is defense-in-depth: if the spender ever underpulls, no residual allowance lingers to be drained on subsequent deposits.
+
+### 8.4 Caller-supplied slippage on `bridgeRemote`
+
+The bonding-curve cash-out leg inside `sucker.prepare` is sandwich-able when `minTokensReclaimed` is zero. `bridgeRemote` is permissionless, so the hook can't unilaterally pick a safe slippage value — instead, it accepts `minTokensReclaimed` as a caller parameter. Callers MUST size this against current pool depth; passing zero leaves the cash-out fully exposed to MEV.

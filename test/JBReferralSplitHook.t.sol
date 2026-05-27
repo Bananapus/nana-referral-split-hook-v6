@@ -8,6 +8,7 @@ import {IJBSplitHook} from "@bananapus/core-v6/src/interfaces/IJBSplitHook.sol";
 import {IJBTerminalStore} from "@bananapus/core-v6/src/interfaces/IJBTerminalStore.sol";
 import {IJBTokens} from "@bananapus/core-v6/src/interfaces/IJBTokens.sol";
 import {IJBDistributor} from "@bananapus/distributor-v6/src/interfaces/IJBDistributor.sol";
+import {JBSuckerState} from "@bananapus/suckers-v6/src/enums/JBSuckerState.sol";
 import {IJBSucker} from "@bananapus/suckers-v6/src/interfaces/IJBSucker.sol";
 import {IJBSuckerRegistry} from "@bananapus/suckers-v6/src/interfaces/IJBSuckerRegistry.sol";
 import {JBClaim} from "@bananapus/suckers-v6/src/structs/JBClaim.sol";
@@ -96,7 +97,8 @@ contract JBReferralSplitHookTest is Test {
             referralChainId: block.chainid,
             referralProjectId: 42,
             sucker: IJBSucker(makeAddr("sucker")),
-            terminalToken: makeAddr("terminalToken")
+            terminalToken: makeAddr("terminalToken"),
+            minTokensReclaimed: 0
         });
     }
 
@@ -106,7 +108,8 @@ contract JBReferralSplitHookTest is Test {
             referralChainId: block.chainid + 1,
             referralProjectId: 0,
             sucker: IJBSucker(makeAddr("sucker")),
-            terminalToken: makeAddr("terminalToken")
+            terminalToken: makeAddr("terminalToken"),
+            minTokensReclaimed: 0
         });
 
         vm.expectRevert(IJBReferralSplitHook.JBReferralSplitHook_InvalidReferralProjectId.selector);
@@ -114,7 +117,8 @@ contract JBReferralSplitHookTest is Test {
             referralChainId: block.chainid + 1,
             referralProjectId: FEE_PROJECT_ID,
             sucker: IJBSucker(makeAddr("sucker")),
-            terminalToken: makeAddr("terminalToken")
+            terminalToken: makeAddr("terminalToken"),
+            minTokensReclaimed: 0
         });
     }
 
@@ -133,7 +137,8 @@ contract JBReferralSplitHookTest is Test {
             referralChainId: block.chainid + 1,
             referralProjectId: 42,
             sucker: sucker,
-            terminalToken: makeAddr("terminalToken")
+            terminalToken: makeAddr("terminalToken"),
+            minTokensReclaimed: 0
         });
     }
 
@@ -231,6 +236,9 @@ contract JBReferralSplitHookTest is Test {
             abi.encodeCall(IJBSuckerRegistry.isSuckerOf, (FEE_PROJECT_ID, address(sucker))),
             abi.encode(true)
         );
+        // The deprecated-sucker rejection runs before the peer-mismatch check; mock ENABLED state so we reach
+        // the peer-mismatch branch we're testing.
+        vm.mockCall(address(sucker), abi.encodeCall(IJBSucker.state, ()), abi.encode(JBSuckerState.ENABLED));
         vm.mockCall(address(sucker), abi.encodeCall(IJBSucker.peerChainId, ()), abi.encode(suckerPeerChain));
 
         vm.expectRevert(
@@ -242,7 +250,8 @@ contract JBReferralSplitHookTest is Test {
             referralChainId: referrerChain,
             referralProjectId: 42,
             sucker: sucker,
-            terminalToken: makeAddr("terminalToken")
+            terminalToken: makeAddr("terminalToken"),
+            minTokensReclaimed: 0
         });
     }
 
@@ -275,4 +284,206 @@ contract JBReferralSplitHookTest is Test {
         );
         hook.packLeafMetadata({originChainId: 1, referralProjectId: oversized});
     }
+
+    //*********************************************************************//
+    // ---------- F-REF-B: bridgeRemote rejects deprecated suckers --------- //
+    //*********************************************************************//
+
+    function test_bridgeRemote_revertsOnDeprecatedSucker() public {
+        IJBSucker sucker = IJBSucker(makeAddr("deprecatedSucker"));
+        vm.mockCall(
+            suckerRegistry,
+            abi.encodeCall(IJBSuckerRegistry.isSuckerOf, (FEE_PROJECT_ID, address(sucker))),
+            abi.encode(true)
+        );
+        vm.mockCall(address(sucker), abi.encodeCall(IJBSucker.state, ()), abi.encode(JBSuckerState.DEPRECATED));
+
+        vm.expectRevert(
+            abi.encodeWithSelector(
+                IJBReferralSplitHook.JBReferralSplitHook_SuckerNotEnabled.selector,
+                address(sucker),
+                JBSuckerState.DEPRECATED
+            )
+        );
+        hook.bridgeRemote({
+            referralChainId: block.chainid + 1,
+            referralProjectId: 42,
+            sucker: sucker,
+            terminalToken: makeAddr("terminalToken"),
+            minTokensReclaimed: 0
+        });
+    }
+
+    function test_bridgeRemote_revertsOnSendingDisabledSucker() public {
+        IJBSucker sucker = IJBSucker(makeAddr("sendingDisabledSucker"));
+        vm.mockCall(
+            suckerRegistry,
+            abi.encodeCall(IJBSuckerRegistry.isSuckerOf, (FEE_PROJECT_ID, address(sucker))),
+            abi.encode(true)
+        );
+        vm.mockCall(address(sucker), abi.encodeCall(IJBSucker.state, ()), abi.encode(JBSuckerState.SENDING_DISABLED));
+
+        vm.expectRevert(
+            abi.encodeWithSelector(
+                IJBReferralSplitHook.JBReferralSplitHook_SuckerNotEnabled.selector,
+                address(sucker),
+                JBSuckerState.SENDING_DISABLED
+            )
+        );
+        hook.bridgeRemote({
+            referralChainId: block.chainid + 1,
+            referralProjectId: 42,
+            sucker: sucker,
+            terminalToken: makeAddr("terminalToken"),
+            minTokensReclaimed: 0
+        });
+    }
+
+    //*********************************************************************//
+    // - claimAndPush: settledLeafOf idempotency + front-run authentication - //
+    //*********************************************************************//
+
+    function test_claimAndPush_revertsOnAlreadySettled() public {
+        // Setup: a previous successful claim has marked the leaf as settled. The second attempt — even with
+        // valid claimData — must revert with LeafAlreadySettled to prevent double-processing.
+        IJBSucker sucker = IJBSucker(makeAddr("sucker"));
+        address terminalToken = makeAddr("terminalToken");
+
+        vm.mockCall(
+            suckerRegistry,
+            abi.encodeCall(IJBSuckerRegistry.isSuckerOf, (FEE_PROJECT_ID, address(sucker))),
+            abi.encode(true)
+        );
+
+        bytes32[32] memory proof;
+        JBClaim memory claimData = JBClaim({
+            token: terminalToken,
+            leaf: JBLeaf({
+                index: 7,
+                beneficiary: bytes32(uint256(uint160(address(hook)))),
+                projectTokenCount: 100,
+                terminalTokenAmount: 50,
+                metadata: hook.packLeafMetadata({originChainId: 10, referralProjectId: 42})
+            }),
+            proof: proof
+        });
+
+        // Use vm.store to seed settledLeafOf as if a prior claimAndPush already settled. The mapping is at
+        // slot determined by storage layout — easier path: invoke the contract path that sets it.
+        // Approach: mock a successful first claim by mocking all downstream calls, run claimAndPush once,
+        // then expect the second to revert.
+        vm.mockCall(
+            address(sucker),
+            abi.encodeCall(IJBSucker.executedLeafHashOf, (terminalToken, 7)),
+            abi.encode(
+                keccak256(
+                    abi.encodePacked(
+                        claimData.leaf.projectTokenCount,
+                        claimData.leaf.terminalTokenAmount,
+                        claimData.leaf.beneficiary,
+                        claimData.leaf.metadata
+                    )
+                )
+            )
+        );
+        vm.mockCall(tokens, abi.encodeCall(IJBTokens.tokenOf, (FEE_PROJECT_ID)), abi.encode(address(0xfee)));
+        vm.mockCall(tokens, abi.encodeCall(IJBTokens.tokenOf, (uint256(42))), abi.encode(address(0)));
+
+        // First call settles via front-run path (burn-on-strand because refToken==0 means no local twin).
+        // We mock the controller for the burn.
+        address feeController = makeAddr("feeController");
+        vm.mockCall(directory, abi.encodeCall(IJBDirectory.controllerOf, (FEE_PROJECT_ID)), abi.encode(feeController));
+        vm.mockCall(feeController, abi.encodeWithSignature("burnTokensOf(address,uint256,uint256,string)"), "");
+
+        hook.claimAndPush({originChainId: 10, referralProjectId: 42, sucker: sucker, claimData: claimData});
+
+        // Second call with same leaf reverts.
+        vm.expectRevert(
+            abi.encodeWithSelector(
+                IJBReferralSplitHook.JBReferralSplitHook_LeafAlreadySettled.selector,
+                address(sucker),
+                terminalToken,
+                uint256(7)
+            )
+        );
+        hook.claimAndPush({originChainId: 10, referralProjectId: 42, sucker: sucker, claimData: claimData});
+    }
+
+    function test_claimAndPush_frontRunHashMismatch_reverts() public {
+        // Setup: leaf at index 7 was front-run by an external sucker.claim. The sucker stored the hash of the
+        // REAL leaf data. Caller submits fabricated claimData with the same index but tampered metadata
+        // (different referralProjectId), trying to redirect settlement.
+        IJBSucker sucker = IJBSucker(makeAddr("sucker"));
+        address terminalToken = makeAddr("terminalToken");
+        bytes32[32] memory proof;
+
+        // The REAL executed leaf was for referralProjectId 42.
+        bytes32 realMetadata = hook.packLeafMetadata({originChainId: 10, referralProjectId: 42});
+        bytes32 realLeafHash = keccak256(
+            abi.encodePacked(uint256(100), uint256(50), bytes32(uint256(uint160(address(hook)))), realMetadata)
+        );
+
+        // Caller fakes claimData for referralProjectId 99 (their own project) at the same index.
+        bytes32 fakeMetadata = hook.packLeafMetadata({originChainId: 10, referralProjectId: 99});
+        JBClaim memory fakeClaim = JBClaim({
+            token: terminalToken,
+            leaf: JBLeaf({
+                index: 7,
+                beneficiary: bytes32(uint256(uint160(address(hook)))),
+                projectTokenCount: 100,
+                terminalTokenAmount: 50,
+                metadata: fakeMetadata
+            }),
+            proof: proof
+        });
+        bytes32 fakeLeafHash = keccak256(
+            abi.encodePacked(uint256(100), uint256(50), bytes32(uint256(uint160(address(hook)))), fakeMetadata)
+        );
+
+        vm.mockCall(
+            suckerRegistry,
+            abi.encodeCall(IJBSuckerRegistry.isSuckerOf, (FEE_PROJECT_ID, address(sucker))),
+            abi.encode(true)
+        );
+        // Sucker stores the REAL leaf's hash, not the fake one.
+        vm.mockCall(
+            address(sucker), abi.encodeCall(IJBSucker.executedLeafHashOf, (terminalToken, 7)), abi.encode(realLeafHash)
+        );
+
+        vm.expectRevert(
+            abi.encodeWithSelector(
+                IJBReferralSplitHook.JBReferralSplitHook_FrontRunLeafMismatch.selector, fakeLeafHash, realLeafHash
+            )
+        );
+        hook.claimAndPush({originChainId: 10, referralProjectId: 99, sucker: sucker, claimData: fakeClaim});
+    }
+
+    //*********************************************************************//
+    // ---- burnUnbridgeableCreditFor uses allSuckersOf (includes dep'd) --- //
+    //*********************************************************************//
+
+    function test_burnUnbridgeable_revertsWhenDeprecatedSuckerPeersToChain() public {
+        // A sucker exists for chain 11 but has been deprecated-and-removed (now lives only in `allSuckersOf`,
+        // not in `suckersOf`). Burning credit for chain 11 must still revert because the credit is still
+        // bridgeable through the deprecated sucker.
+        address depSucker = makeAddr("deprecatedSuckerToChain11");
+        address[] memory all = new address[](1);
+        all[0] = depSucker;
+
+        vm.mockCall(suckerRegistry, abi.encodeCall(IJBSuckerRegistry.allSuckersOf, (FEE_PROJECT_ID)), abi.encode(all));
+        vm.mockCall(depSucker, abi.encodeCall(IJBSucker.peerChainId, ()), abi.encode(uint256(11)));
+
+        vm.expectRevert(
+            abi.encodeWithSelector(
+                IJBReferralSplitHook.JBReferralSplitHook_SuckerExistsForChain.selector, depSucker, uint256(11)
+            )
+        );
+        hook.burnUnbridgeableCreditFor({referralChainId: 11, referralProjectId: 42});
+    }
+
+    // NOTE: `test_burnUnbridgeable_skipsBrokenPeerChainId` (try/catch on peerChainId) is best validated in the
+    // fork-test layer where a real broken sucker can be constructed and the full `processSplitWith` -> burn
+    // path runs end-to-end. The unit-test layer here doesn't have a clean way to populate `totalDeposited`
+    // (which requires constructing a real `JBSplitHookContext`). See `deploy-all-v6/test/fork/
+    // ReferralRewardCrossChainFork.t.sol` for that integration coverage.
 }
