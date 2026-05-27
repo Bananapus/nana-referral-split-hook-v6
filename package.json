@@ -4,7 +4,7 @@
   "license": "MIT",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/Bananapus/nana-referral-split-hook-v6"
+    "url": "git+https://github.com/Bananapus/nana-referral-split-hook-v6.git"
   },
   "files": [
     "foundry.toml",

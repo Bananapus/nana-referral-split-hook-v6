@@ -37,7 +37,7 @@ contract JBReferralSplitHook is ERC165, IJBReferralSplitHook {
     using SafeERC20 for IERC20;
 
     //*********************************************************************//
-    // ------------------------------ errors ------------------------------ //
+    // --------------------------- custom errors ------------------------- //
     //*********************************************************************//
 
     /// @notice `packLeafMetadata` rejected an `originChainId` larger than `type(uint32).max` so the high bits
