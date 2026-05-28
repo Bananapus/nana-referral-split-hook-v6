@@ -2,14 +2,17 @@
 
 `@bananapus/referral-split-hook-v6` is a split hook that routes the fee project's reserved-token pool to referring projects' IVotes holders, in proportion to attributed fee volume. Same-chain referrers are pushed to a local `JBTokenDistributor`; cross-chain referrers are bridged through the fee project's sucker and settled atomically on their home chain. Credit on chains with no sucker pair is burned to the fee-project surplus rather than left to dilute existing holders.
 
-Architecture: [ARCHITECTURE.md](./ARCHITECTURE.md)
-User journeys: [USER_JOURNEYS.md](./USER_JOURNEYS.md)
-Skills: [SKILLS.md](./SKILLS.md)
-Risks: [RISKS.md](./RISKS.md)
-Administration: [ADMINISTRATION.md](./ADMINISTRATION.md)
-Audit instructions: [AUDIT_INSTRUCTIONS.md](./AUDIT_INSTRUCTIONS.md)
-Style guide: [STYLE_GUIDE.md](./STYLE_GUIDE.md)
-Changelog: [CHANGELOG.md](./CHANGELOG.md)
+## Documentation
+
+- [ARCHITECTURE.md](./ARCHITECTURE.md) — module-level dataflow including the cross-chain path
+- [USER_JOURNEYS.md](./USER_JOURNEYS.md) — five end-to-end flows from real callers' perspectives
+- [INVARIANTS.md](./INVARIANTS.md) — operational invariants enumerated per-contract
+- [RISKS.md](./RISKS.md) — risk register and the burn-vs-defer-vs-revert design contract
+- [ADMINISTRATION.md](./ADMINISTRATION.md) — control posture, roles, recovery
+- [AUDIT_INSTRUCTIONS.md](./AUDIT_INSTRUCTIONS.md) — where to look, what must hold
+- [SKILLS.md](./SKILLS.md) — quick-reference facts for AI agents working in this repo
+- [STYLE_GUIDE.md](./STYLE_GUIDE.md) — repo-internal style ref
+- [CHANGELOG.md](./CHANGELOG.md) — version history
 
 ## Overview
 

@@ -25,7 +25,7 @@ In scope:
 Out of scope (but heavily referenced):
 
 - `JBTerminalStore.feeVolumeByReferralOf` — the volume ledger. Audited in `nana-core-v6`.
-- `JBSucker.claim` / `JBSucker.prepare` / `JBSuckerRegistry.suckersOf` — the bridge plumbing. Audited in `nana-suckers-v6`.
+- `JBSucker.claim` / `JBSucker.prepare` / `JBSuckerRegistry.isSuckerOf` / `JBSuckerRegistry.allSuckersOf` — the bridge plumbing. Audited in `nana-suckers-v6`.
 - `JBTokenDistributor.fund` — the destination. Audited in `nana-distributor-v6`.
 - `JBController.mintTokensOf` and `burnTokensOf` — minted and burned via callbacks from the sucker and this hook respectively. Audited in `nana-core-v6`.
 

@@ -1,7 +1,5 @@
 # Invariants of `nana-referral-split-hook-v6`
 
-Last updated: 2026-05-28.
-
 Scope: the single production contract in `src/` — `JBReferralSplitHook` — plus its `IJBReferralSplitHook` interface in `src/interfaces/`. The hook sits on the fee project's reserved-token split group, pools incoming fee-project tokens via the controller's `processSplitWith` call, and forwards each referring project's pro-rata share to its rightful destination: a local `JBTokenDistributor` (same-chain referrer), the fee project's sucker outbox (cross-chain referrer), or the burn path (credit on a chain with no sucker pair, or a destination chain with no local twin ERC-20).
 
 This file is the per-repo scoped invariants doc. The protocol-wide guarantees for the seven deployed revnets live in [`../INVARIANTS.md`](../INVARIANTS.md); section C.24 there summarizes this repo from the protocol's perspective. The cross-cutting "burn-on-strand vs deferral" design contract lives in `RISKS.md` Section 7; this file enumerates the operational invariants that implement that contract.
@@ -190,18 +188,16 @@ Upstream centralization that affects this hook indirectly:
 
 # Doc audit notes
 
-Audit pass over the eight existing top-level docs:
+Audit pass over the nine top-level docs:
 
-- **README.md** — current; mental model and key-state summary match the contract. References all sibling docs and the cross-chain E2E test path. No edits.
-- **ARCHITECTURE.md** — current; the four routing destinations (push / bridge / claim / burn) align with the source. "Core Invariants" section overlaps with this INVARIANTS.md at a higher altitude; kept as a quick-reference summary. No edits.
-- **RISKS.md** — current; Section 7 ("Accepted Behaviors") is the canonical deferral-vs-stranding contract that this INVARIANTS.md implements operationally, and Section 8 ("Front-Run Protection For `claimAndPush`") is the threat-model rationale for Section A.4.5 here. No duplication worth deleting — RISKS.md is "why," INVARIANTS.md is "what holds and where." No edits.
-- **USER_JOURNEYS.md** — current.
-- **ADMINISTRATION.md** — current; the no-admin / no-pause / no-upgrade posture matches Section B. The "Recovery" section's recommendation that wrong-immutable deploys are recoverable by redeploy and re-wiring is consistent with this file. No edits.
-- **AUDIT_INSTRUCTIONS.md** — current.
-- **SKILLS.md** — current; the codified skills (`jb-referral-hook-deferral-vs-stranding`, `jb-sucker-claim-front-run-defense`) are referenced from this INVARIANTS.md and remain the canonical pattern docs.
-- **CHANGELOG.md** — current; recent entries cover the F-REF-* hardening sweep that this INVARIANTS.md catalogs. The current `package.json` version is `0.0.8`; CHANGELOG covers up through the harden sweep.
+- **README.md** — current; mental model and key-state summary match the contract. The top-of-file "Documentation" section enumerates every sibling doc.
+- **ARCHITECTURE.md** — current; the four routing destinations (push / bridge / claim / burn) align with the source. Fixed: the `burnUnbridgeableCreditFor` flow correctly references `allSuckersOf` (the contract iterates the full set including DEPRECATED entries, not just `suckersOf`).
+- **RISKS.md** — current; Section 7 ("Accepted Behaviors") is the canonical deferral-vs-stranding contract that this INVARIANTS.md implements operationally, and Section 8 ("Front-Run Protection For `claimAndPush`") is the threat-model rationale for Section A.4.5 here. Fixed: 7.1 no longer reads as implying a future "deferred design" recycle path (there is none — burn-on-strand is the only recovery for cross-chain dust; same-chain dust waits on referrer tokenization).
+- **USER_JOURNEYS.md** — current; trust-boundary and journey-2 preconditions reference `allSuckersOf` to match the contract.
+- **ADMINISTRATION.md** — current; the no-admin / no-pause / no-upgrade posture matches Section B.
+- **AUDIT_INSTRUCTIONS.md** — current; out-of-scope list references `isSuckerOf` / `allSuckersOf` to match the contract's actual registry surface.
+- **SKILLS.md** — refreshed; now reflects the full entrypoint set (`bridgeRemote`, `claimAndPush`, `burnUnbridgeableCreditFor`), the seven constructor immutables, the burn-vs-defer-vs-revert matrix, and the front-run defense. The codified skills (`jb-referral-hook-deferral-vs-stranding`, `jb-sucker-claim-front-run-defense`) remain the canonical pattern docs.
+- **CHANGELOG.md** — current; historical 0.0.4 entry preserves the original `suckersOf` wording from that release (the code later changed to `allSuckersOf` as part of the F-REF-* harden sweep; current behavior is documented in ARCHITECTURE.md and SKILLS.md).
 - **STYLE_GUIDE.md** — repo-internal style ref, unaffected.
 
-PR Bananapus/nana-referral-split-hook-v6#11 ("park-and-retry / `pokeDeferredClaim`") was CLOSED — confirmed by absence of `pokeDeferredClaim`, `parkedOf`, or any deferred-claim entrypoint in `src/JBReferralSplitHook.sol`. Burn-on-strand (`claimAndPush` burning on missing local twin, `burnUnbridgeableCreditFor` for unbridgeable cross-chain credit) is the official design.
-
-No staleness corrections, no duplications worth deleting, no contradictions found.
+PR Bananapus/nana-referral-split-hook-v6#11 ("park-and-retry / `pokeDeferredClaim`") was CLOSED — confirmed by absence of `pokeDeferredClaim`, `parkedOf`, or any deferred-claim entrypoint in `src/JBReferralSplitHook.sol`. Burn-on-strand (`claimAndPush` burning on missing local twin, `burnUnbridgeableCreditFor` for unbridgeable cross-chain credit) is the official design — no doc implies otherwise.

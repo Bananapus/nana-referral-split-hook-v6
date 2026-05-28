@@ -22,7 +22,7 @@ This file covers `JBReferralSplitHook` — a single split-hook contract that fan
 
 - **`JBDirectory.controllerOf(FEE_PROJECT_ID)` is honest.** It identifies the single legal caller of `processSplitWith`. A controller swap on the fee project moves the deposit authority.
 - **`JBTerminalStore.feeVolumeByReferralOf` and `totalFeeVolumeOf` are atomic and currency-normalized.** The store normalizes USDC/USD/etc. fees to NATIVE_TOKEN 18-decimal units; the hook does not re-normalize.
-- **`JBSuckerRegistry.suckersOf(feeProjectId)` is authoritative.** The grief-resistance check on `burnUnbridgeableCreditFor` iterates this list.
+- **`JBSuckerRegistry.allSuckersOf(feeProjectId)` is authoritative.** The grief-resistance check on `burnUnbridgeableCreditFor` iterates this list (including DEPRECATED entries, since they still settle pending inbound claims).
 - **`IJBSucker.peerChainId()` returns the actual peer chain.** The hook does not cross-verify against any other source.
 - **The sucker's merkle proof + leaf hashing matches the source-side `_buildTreeHash` exactly.** Otherwise legitimate claims revert and forged claims could pass.
 - **The referrer-supplied IVotes token (`TOKENS.tokenOf(refProjectId)`) is not malicious.** A referrer who lies about their token routes their OWN share — but their `transferFrom` can re-enter the hook if the distributor's `fund` triggers it.
@@ -73,7 +73,7 @@ This file covers `JBReferralSplitHook` — a single split-hook contract that fan
 
 ### 7.1 Same-chain credit-only referrer defers indefinitely
 
-If a referring project has only issued credits (no `IJBToken` ERC-20), `pushTo(localChainId, refProjectId)` is a no-op. The HWM is rolled back so the share stays claimable when the project tokenizes. If they never tokenize, the share sits in the hook indefinitely — this is deferral, not stranding (recoverable). Operators who want to recycle this dust would need a separate governance write-off (deferred design).
+If a referring project has only issued credits (no `IJBToken` ERC-20), `pushTo(localChainId, refProjectId)` is a no-op. The HWM is rolled back so the share stays claimable when the project tokenizes. If they never tokenize, the share sits in the hook indefinitely — this is deferral, not stranding (recoverable). There is no operator entrypoint to recycle this dust; recovery requires the referrer to deploy their ERC-20.
 
 ### 7.2 Cross-chain credit on a chain with no sucker is burned
 
