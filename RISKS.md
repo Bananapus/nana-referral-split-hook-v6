@@ -13,7 +13,7 @@ This file covers `JBReferralSplitHook` — a single split-hook contract that fan
 | Priority | Risk | Why it matters | Primary controls |
 |----------|------|----------------|------------------|
 | P0 | Mis-routed share via spoofed leaf or wrong sucker peer | Funds bound for one referrer land at another — or in an attacker-controlled distributor key. | Sucker registry check + `peerChainId()` match + leaf `metadata` exact-equality with `(originChainId, refProjectId)`. |
-| P0 | Stranding: leaf consumed without a recipient or a burn | Bridged value silently locked in the hook, diluting every fee-token holder forever. | Burn-over-strand policy in `claimAndPush`; permissionless `burnUnbridgeableCreditFor` for cross-chain pools. |
+| P0 | Stranding: leaf consumed without a recipient or a burn | Bridged value silently locked in the hook, diluting every fee-token holder forever. | Park-and-retry-via-`pokeDeferredClaim` policy in `claimAndPush` for missing local twins; permissionless `burnUnbridgeableCreditFor` for cross-chain pools whose destination chain has no sucker. |
 | P1 | Pro-rata math overflow or rounding skew | A referrer gets more (or less) than `mulDiv(totalDeposited, refVol, totalVol)`. | mulDiv used everywhere; `_pendingDeltaFor` is the single source of truth; HWMs are monotonic. |
 | P1 | Late-entrant skew across rounds | New referrer drives volume after an earlier one pushed; the earlier one's `entitled` can drop below their HWM and the residual stays in the hook. | Documented as accepted behavior; severity is bounded by the actual volume ratio change. |
 | P1 | Mis-wired sucker permissions | `claimAndPush` reverts because the sucker lacks `MINT_TOKENS`; leaf stays unconsumed in the inbox, recoverable by granting and retrying. | Documented as a deployment checklist step. |
@@ -31,7 +31,7 @@ This file covers `JBReferralSplitHook` — a single split-hook contract that fan
 
 - **Late-entrant share skew.** `entitled = totalDeposited * refVolume / totalFeeVolume` is computed at push time, not at deposit time. If a new referrer drives a large share of volume **after** an earlier referrer has pushed, the earlier referrer's `entitled` can drop below `pushedLocallyOf`. The hook clamps at zero (no claw-back); the residual tokens stay in the hook permanently. Severity is low because total `mulDiv` allocations sum to ≤ `totalDeposited` regardless.
 - **Pro-rata sum bound.** Across all `(chainId, projectId)` pairs, the sum of `pushedLocallyOf + bridgedOutOf` must never exceed `totalDeposited` modulo a small mulDiv rounding tail (one wei per active referrer in the worst case).
-- **Burn dilutes by design.** `claimAndPush` burning fresh supply on a missing local twin, and `burnUnbridgeableCreditFor` burning unspendable cross-chain credit, both convert otherwise-stranded value into pro-rata surplus for existing fee-token holders.
+- **Burn dilutes by design.** `burnUnbridgeableCreditFor` burning unspendable cross-chain credit converts otherwise-stranded value into pro-rata surplus for existing fee-token holders. `claimAndPush` on a missing local twin no longer burns — it parks the freshly-minted tokens keyed by leaf identity for `pokeDeferredClaim` to release once the referrer tokenizes.
 - **Late sucker deploy can't reach burned credit.** Once `burnUnbridgeableCreditFor` advances `bridgedOutOf`, a sucker deployed later for that chain can only bridge INCREMENTAL credit — the burned portion is permanently gone for the would-be referrer.
 
 ## 3. Access Control And Caller Risks
@@ -79,9 +79,9 @@ If a referring project has only issued credits (no `IJBToken` ERC-20), `pushTo(l
 
 The cross-chain analog of 7.1 is NOT deferral — it's stranding. Anyone calls `burnUnbridgeableCreditFor(chainId, projectId)`; the hook confirms no sucker peers to `chainId`, computes the entitled delta, advances `bridgedOutOf`, and burns the equivalent fee-project tokens. The bridged terminal-token value (already in the fee project's balance from the original protocol-fee flow) now accrues pro-rata to existing fee-token holders.
 
-### 7.3 `claimAndPush` burns on missing local twin
+### 7.3 `claimAndPush` parks on missing local twin (pending tokenization)
 
-When the sucker leaf settles but the local twin's `TOKENS.tokenOf(refProjectId)` is `address(0)`, the freshly-minted fee-project tokens are burned rather than left in the hook. The leaf is single-use and is now consumed; holding the supply would permanently dilute existing holders for no recipient.
+When the sucker leaf settles but the local twin's `TOKENS.tokenOf(refProjectId)` is `address(0)`, the freshly-minted fee-project tokens are PARKED in this hook keyed by `keccak256(abi.encode(sucker, terminalToken, leafIndex))`. The leaf is single-use and is now consumed, but the parked credit is recoverable: anyone can call `pokeDeferredClaim(sucker, terminalToken, leafIndex)` to release the parked amount to the local distributor once the referrer tokenizes via `JBController.deployERC20For`. This is the cross-chain analog of `pushTo`'s "no token" deferral (see 7.1) — the leaf cannot be retried, but the value can. If the referrer never tokenizes, the parked amount sits in the hook indefinitely (recoverable; not stranded). Operators who want to recycle long-stale parks would need a separate governance write-off (deliberately not adding a permissionless burn-after-N-days here to avoid re-introducing the brittleness this design removes).
 
 ### 7.4 Late-entrant share skew is bounded
 

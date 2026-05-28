@@ -1,5 +1,40 @@
 # Changelog
 
+## 0.0.5
+
+Park-and-retry deferred claim instead of burn-on-strand. When `claimAndPush` settles a leaf whose local twin has no `IJBToken` yet, the freshly-minted fee-project tokens are now PARKED in the hook keyed by `(sucker, terminalToken, leafIndex)` instead of being burned. Anyone can later call `pokeDeferredClaim(sucker, terminalToken, leafIndex)` to release the parked amount to the local distributor once the referrer tokenizes via `JBController.deployERC20For`.
+
+### Behavior changes
+
+- **`claimAndPush` now parks on missing local twin instead of burning.** Previously the freshly-minted fee-project tokens were burned (D6 in `EFFICIENCY_LESSONS.md`); the leaf bitmap was already set, so the referrer's credit was lost forever even if they later tokenized. The new behavior preserves the credit indefinitely by parking it under a leaf-identity key.
+
+### New storage
+
+- `mapping(bytes32 strandedKey => uint256 amount) parkedAmountOf` — keyed by `keccak256(abi.encode(sucker, terminalToken, leafIndex))`.
+- `mapping(bytes32 strandedKey => uint256 referralProjectId) parkedReferralProjectIdOf` — mirrors `parkedAmountOf` so the poker can re-derive the destination without trusting calldata.
+
+### New entrypoints
+
+- **`pokeDeferredClaim(sucker, terminalToken, leafIndex) → pushed`** — permissionless. Looks up the parked amount, re-derives the referral project from storage, resolves the referrer's `IJBToken`, and funds the local distributor. Clears the park BEFORE the external call.
+
+### New errors
+
+- `JBReferralSplitHook_NothingParked(strandedKey)` — nothing parked at the supplied key (never parked, or already poked).
+- `JBReferralSplitHook_StillStranded(referralProjectId)` — referrer still has no `IJBToken`; the park stays put.
+
+### New events
+
+- `ParkedOnStrand(originChainId, referralProjectId, sucker, terminalToken, leafIndex, feeProjectParked, caller)` — emitted by `claimAndPush` when the local twin has no `IJBToken`.
+- `PokedDeferredClaim(strandedKey, referralProjectId, amount, caller)` — emitted on successful deferred release.
+
+### Deprecations
+
+- `BurnedOnStrand` event is no longer emitted by `claimAndPush`. Retained in the interface ABI for one major release so historical event logs remain decodable.
+
+### Trade-off
+
+- No permissionless burn-after-N-days escape hatch. If the referrer never tokenizes, the parked amount sits indefinitely (recoverable; not stranded). A governance-gated sweep can be added later if long-stale parks need cleanup — deliberately not adding a permissionless burn-timer here to avoid re-introducing the brittleness this fix removes. See `RISKS.md` § 7.3.
+
 ## 0.0.4
 
 Cross-chain settlement, burn-over-strand policy, defense-in-depth validation. Breaking ABI (new entrypoints, new errors, new events; rewritten `claimAndPush` semantics on the missing-twin path).

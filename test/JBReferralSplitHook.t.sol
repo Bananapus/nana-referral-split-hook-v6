@@ -3,6 +3,8 @@ pragma solidity 0.8.28;
 
 import {Test} from "forge-std/Test.sol";
 
+import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
+
 import {IJBDirectory} from "@bananapus/core-v6/src/interfaces/IJBDirectory.sol";
 import {IJBSplitHook} from "@bananapus/core-v6/src/interfaces/IJBSplitHook.sol";
 import {IJBTerminalStore} from "@bananapus/core-v6/src/interfaces/IJBTerminalStore.sol";
@@ -368,10 +370,9 @@ contract JBReferralSplitHookTest is Test {
             proof: proof
         });
 
-        // Use vm.store to seed settledLeafOf as if a prior claimAndPush already settled. The mapping is at
-        // slot determined by storage layout — easier path: invoke the contract path that sets it.
-        // Approach: mock a successful first claim by mocking all downstream calls, run claimAndPush once,
-        // then expect the second to revert.
+        // Mock a successful first claim via the front-run path (sucker already executed). Local twin has no
+        // IJBToken, so the first call PARKS the minted amount and sets settledLeafOf. The second call
+        // must then revert with LeafAlreadySettled.
         vm.mockCall(
             address(sucker),
             abi.encodeCall(IJBSucker.executedLeafHashOf, (terminalToken, 7)),
@@ -389,13 +390,14 @@ contract JBReferralSplitHookTest is Test {
         vm.mockCall(tokens, abi.encodeCall(IJBTokens.tokenOf, (FEE_PROJECT_ID)), abi.encode(address(0xfee)));
         vm.mockCall(tokens, abi.encodeCall(IJBTokens.tokenOf, (uint256(42))), abi.encode(address(0)));
 
-        // First call settles via front-run path (burn-on-strand because refToken==0 means no local twin).
-        // We mock the controller for the burn.
-        address feeController = makeAddr("feeController");
-        vm.mockCall(directory, abi.encodeCall(IJBDirectory.controllerOf, (FEE_PROJECT_ID)), abi.encode(feeController));
-        vm.mockCall(feeController, abi.encodeWithSignature("burnTokensOf(address,uint256,uint256,string)"), "");
-
+        // First call settles via front-run path. Park-on-strand fires because the local twin has no
+        // IJBToken — no controller burn call is needed.
         hook.claimAndPush({originChainId: 10, referralProjectId: 42, sucker: sucker, claimData: claimData});
+
+        // The park mapping is now populated keyed by `(sucker, terminalToken, leafIndex)`.
+        bytes32 strandedKey = keccak256(abi.encode(sucker, terminalToken, uint256(7)));
+        assertEq(hook.parkedAmountOf(strandedKey), 100, "parked amount should equal projectTokenCount");
+        assertEq(hook.parkedReferralProjectIdOf(strandedKey), 42, "parked refProjectId should equal local twin");
 
         // Second call with same leaf reverts.
         vm.expectRevert(
@@ -407,6 +409,373 @@ contract JBReferralSplitHookTest is Test {
             )
         );
         hook.claimAndPush({originChainId: 10, referralProjectId: 42, sucker: sucker, claimData: claimData});
+    }
+
+    //*********************************************************************//
+    // ----- D6: park-and-retry deferred claim instead of burn-on-strand --- //
+    //*********************************************************************//
+
+    function test_claimAndPush_parksWhenLocalTwinHasNoToken() public {
+        // When the local twin's TOKENS.tokenOf returns address(0), the freshly-minted fee-project tokens
+        // are parked (not burned). Asserts: park mapping populated, ParkedOnStrand emitted, NO controller
+        // burn call (we don't mock it — if the contract tried to burn the test would revert from the
+        // missing mock), ClaimedRemote(pushed: 0) still emitted.
+        IJBSucker sucker = IJBSucker(makeAddr("sucker"));
+        address terminalToken = makeAddr("terminalToken");
+        uint256 originChainId = 10;
+        uint256 referralProjectId = 42;
+        uint256 leafIndex = 3;
+        uint256 projectTokenCount = 1234;
+
+        vm.mockCall(
+            suckerRegistry,
+            abi.encodeCall(IJBSuckerRegistry.isSuckerOf, (FEE_PROJECT_ID, address(sucker))),
+            abi.encode(true)
+        );
+
+        bytes32[32] memory proof;
+        JBClaim memory claimData = JBClaim({
+            token: terminalToken,
+            leaf: JBLeaf({
+                index: leafIndex,
+                beneficiary: bytes32(uint256(uint160(address(hook)))),
+                projectTokenCount: projectTokenCount,
+                terminalTokenAmount: 50,
+                metadata: hook.packLeafMetadata({originChainId: originChainId, referralProjectId: referralProjectId})
+            }),
+            proof: proof
+        });
+
+        // Front-run path: sucker already executed this leaf (so the hook does not call sucker.claim).
+        bytes32 storedHash = keccak256(
+            abi.encodePacked(
+                claimData.leaf.projectTokenCount,
+                claimData.leaf.terminalTokenAmount,
+                claimData.leaf.beneficiary,
+                claimData.leaf.metadata
+            )
+        );
+        vm.mockCall(
+            address(sucker),
+            abi.encodeCall(IJBSucker.executedLeafHashOf, (terminalToken, leafIndex)),
+            abi.encode(storedHash)
+        );
+        vm.mockCall(tokens, abi.encodeCall(IJBTokens.tokenOf, (FEE_PROJECT_ID)), abi.encode(address(0xfee)));
+        // Local twin has no IJBToken — triggers the park-on-strand path.
+        vm.mockCall(tokens, abi.encodeCall(IJBTokens.tokenOf, (referralProjectId)), abi.encode(address(0)));
+
+        // The controller is NOT mocked — if claimAndPush tried to burn, the call to a non-existent
+        // controller (DIRECTORY.controllerOf is also unmocked) would revert and fail the test.
+
+        // Expect ParkedOnStrand emitted with exactly these fields.
+        vm.expectEmit(true, true, false, true, address(hook));
+        emit IJBReferralSplitHook.ParkedOnStrand({
+            originChainId: originChainId,
+            referralProjectId: referralProjectId,
+            sucker: sucker,
+            terminalToken: terminalToken,
+            leafIndex: leafIndex,
+            feeProjectParked: projectTokenCount,
+            caller: address(this)
+        });
+        // And ClaimedRemote with pushed = 0.
+        vm.expectEmit(true, true, true, true, address(hook));
+        emit IJBReferralSplitHook.ClaimedRemote({
+            originChainId: originChainId,
+            referralProjectId: referralProjectId,
+            terminalToken: terminalToken,
+            terminalReceived: claimData.leaf.terminalTokenAmount,
+            feeProjectMinted: projectTokenCount,
+            pushed: 0,
+            caller: address(this)
+        });
+        uint256 pushed = hook.claimAndPush({
+            originChainId: originChainId, referralProjectId: referralProjectId, sucker: sucker, claimData: claimData
+        });
+        assertEq(pushed, 0, "no immediate push when stranded");
+
+        // Park mapping populated.
+        bytes32 strandedKey = keccak256(abi.encode(sucker, terminalToken, leafIndex));
+        assertEq(hook.parkedAmountOf(strandedKey), projectTokenCount, "parked amount");
+        assertEq(hook.parkedReferralProjectIdOf(strandedKey), referralProjectId, "parked refProjectId");
+        // Leaf is settled.
+        assertTrue(hook.settledLeafOf(sucker, terminalToken, leafIndex), "leaf marked settled");
+    }
+
+    function test_claimAndPush_parkSetsKeyExactlyOnce() public {
+        // A second claimAndPush with the same `(sucker, terminalToken, leafIndex)` must revert
+        // LeafAlreadySettled — the park happens exactly once per leaf, and the bitmap protects re-entry.
+        IJBSucker sucker = IJBSucker(makeAddr("sucker"));
+        address terminalToken = makeAddr("terminalToken");
+
+        vm.mockCall(
+            suckerRegistry,
+            abi.encodeCall(IJBSuckerRegistry.isSuckerOf, (FEE_PROJECT_ID, address(sucker))),
+            abi.encode(true)
+        );
+
+        bytes32[32] memory proof;
+        JBClaim memory claimData = JBClaim({
+            token: terminalToken,
+            leaf: JBLeaf({
+                index: 9,
+                beneficiary: bytes32(uint256(uint160(address(hook)))),
+                projectTokenCount: 77,
+                terminalTokenAmount: 33,
+                metadata: hook.packLeafMetadata({originChainId: 10, referralProjectId: 42})
+            }),
+            proof: proof
+        });
+
+        bytes32 storedHash = keccak256(
+            abi.encodePacked(
+                claimData.leaf.projectTokenCount,
+                claimData.leaf.terminalTokenAmount,
+                claimData.leaf.beneficiary,
+                claimData.leaf.metadata
+            )
+        );
+        vm.mockCall(
+            address(sucker),
+            abi.encodeCall(IJBSucker.executedLeafHashOf, (terminalToken, uint256(9))),
+            abi.encode(storedHash)
+        );
+        vm.mockCall(tokens, abi.encodeCall(IJBTokens.tokenOf, (FEE_PROJECT_ID)), abi.encode(address(0xfee)));
+        vm.mockCall(tokens, abi.encodeCall(IJBTokens.tokenOf, (uint256(42))), abi.encode(address(0)));
+
+        // First call parks.
+        hook.claimAndPush({originChainId: 10, referralProjectId: 42, sucker: sucker, claimData: claimData});
+
+        // Second call reverts — even though the local twin still has no token, the leaf is already settled
+        // and cannot be re-parked.
+        vm.expectRevert(
+            abi.encodeWithSelector(
+                JBReferralSplitHook.JBReferralSplitHook_LeafAlreadySettled.selector,
+                address(sucker),
+                terminalToken,
+                uint256(9)
+            )
+        );
+        hook.claimAndPush({originChainId: 10, referralProjectId: 42, sucker: sucker, claimData: claimData});
+    }
+
+    function test_pokeDeferredClaim_succeedsAfterTokenization() public {
+        // Round trip: park via claimAndPush -> tokenize the referrer -> call pokeDeferredClaim ->
+        // assert _fundDistributor effects fire (forceApprove + fund) -> mapping cleared.
+        IJBSucker sucker = IJBSucker(makeAddr("sucker"));
+        address terminalToken = makeAddr("terminalToken");
+        uint256 leafIndex = 5;
+        uint256 projectTokenCount = 555;
+        uint256 referralProjectId = 42;
+        address feeERC20 = makeAddr("feeERC20");
+        address refERC20 = makeAddr("refERC20");
+
+        vm.mockCall(
+            suckerRegistry,
+            abi.encodeCall(IJBSuckerRegistry.isSuckerOf, (FEE_PROJECT_ID, address(sucker))),
+            abi.encode(true)
+        );
+
+        bytes32[32] memory proof;
+        JBClaim memory claimData = JBClaim({
+            token: terminalToken,
+            leaf: JBLeaf({
+                index: leafIndex,
+                beneficiary: bytes32(uint256(uint160(address(hook)))),
+                projectTokenCount: projectTokenCount,
+                terminalTokenAmount: 50,
+                metadata: hook.packLeafMetadata({originChainId: 10, referralProjectId: referralProjectId})
+            }),
+            proof: proof
+        });
+
+        bytes32 storedHash = keccak256(
+            abi.encodePacked(
+                claimData.leaf.projectTokenCount,
+                claimData.leaf.terminalTokenAmount,
+                claimData.leaf.beneficiary,
+                claimData.leaf.metadata
+            )
+        );
+        vm.mockCall(
+            address(sucker),
+            abi.encodeCall(IJBSucker.executedLeafHashOf, (terminalToken, leafIndex)),
+            abi.encode(storedHash)
+        );
+        vm.mockCall(tokens, abi.encodeCall(IJBTokens.tokenOf, (FEE_PROJECT_ID)), abi.encode(feeERC20));
+        // Round 1: ref has no IJBToken — claim parks.
+        vm.mockCall(tokens, abi.encodeCall(IJBTokens.tokenOf, (referralProjectId)), abi.encode(address(0)));
+        hook.claimAndPush({
+            originChainId: 10, referralProjectId: referralProjectId, sucker: sucker, claimData: claimData
+        });
+        bytes32 strandedKey = keccak256(abi.encode(sucker, terminalToken, leafIndex));
+        assertEq(hook.parkedAmountOf(strandedKey), projectTokenCount, "park populated");
+
+        // Round 2: referrer tokenizes — TOKENS.tokenOf now returns a real IJBToken.
+        vm.mockCall(tokens, abi.encodeCall(IJBTokens.tokenOf, (referralProjectId)), abi.encode(refERC20));
+        // The distributor pull path: forceApprove(distributor, amount), DISTRIBUTOR.fund(refToken, fee, amount),
+        // forceApprove(distributor, 0). Mock the fee-token approve and the distributor's fund.
+        vm.mockCall(feeERC20, abi.encodeWithSignature("approve(address,uint256)"), abi.encode(true));
+        vm.mockCall(
+            feeERC20,
+            abi.encodeWithSignature("allowance(address,address)", address(hook), distributor),
+            abi.encode(uint256(0))
+        );
+        vm.mockCall(
+            distributor, abi.encodeCall(IJBDistributor.fund, (refERC20, IERC20(feeERC20), projectTokenCount)), ""
+        );
+
+        // Expect a fund call on the distributor with exact args.
+        vm.expectCall(
+            distributor, abi.encodeCall(IJBDistributor.fund, (refERC20, IERC20(feeERC20), projectTokenCount)), 1
+        );
+        // Expect a PokedDeferredClaim event.
+        vm.expectEmit(true, true, false, true, address(hook));
+        emit IJBReferralSplitHook.PokedDeferredClaim({
+            strandedKey: strandedKey,
+            referralProjectId: referralProjectId,
+            amount: projectTokenCount,
+            caller: address(this)
+        });
+        uint256 pushed = hook.pokeDeferredClaim({sucker: sucker, terminalToken: terminalToken, leafIndex: leafIndex});
+        assertEq(pushed, projectTokenCount, "released full parked amount");
+
+        // Mapping cleared.
+        assertEq(hook.parkedAmountOf(strandedKey), 0, "park cleared");
+        assertEq(hook.parkedReferralProjectIdOf(strandedKey), 0, "park refId cleared");
+    }
+
+    function test_pokeDeferredClaim_revertsWhenStillStranded() public {
+        // Park, then call pokeDeferredClaim without mocking the referrer's IJBToken — still address(0) —
+        // and assert StillStranded reverts with the parked refProjectId.
+        IJBSucker sucker = IJBSucker(makeAddr("sucker"));
+        address terminalToken = makeAddr("terminalToken");
+        uint256 leafIndex = 11;
+        uint256 referralProjectId = 42;
+
+        vm.mockCall(
+            suckerRegistry,
+            abi.encodeCall(IJBSuckerRegistry.isSuckerOf, (FEE_PROJECT_ID, address(sucker))),
+            abi.encode(true)
+        );
+
+        bytes32[32] memory proof;
+        JBClaim memory claimData = JBClaim({
+            token: terminalToken,
+            leaf: JBLeaf({
+                index: leafIndex,
+                beneficiary: bytes32(uint256(uint160(address(hook)))),
+                projectTokenCount: 88,
+                terminalTokenAmount: 44,
+                metadata: hook.packLeafMetadata({originChainId: 10, referralProjectId: referralProjectId})
+            }),
+            proof: proof
+        });
+        bytes32 storedHash = keccak256(
+            abi.encodePacked(
+                claimData.leaf.projectTokenCount,
+                claimData.leaf.terminalTokenAmount,
+                claimData.leaf.beneficiary,
+                claimData.leaf.metadata
+            )
+        );
+        vm.mockCall(
+            address(sucker),
+            abi.encodeCall(IJBSucker.executedLeafHashOf, (terminalToken, leafIndex)),
+            abi.encode(storedHash)
+        );
+        vm.mockCall(tokens, abi.encodeCall(IJBTokens.tokenOf, (FEE_PROJECT_ID)), abi.encode(address(0xfee)));
+        vm.mockCall(tokens, abi.encodeCall(IJBTokens.tokenOf, (referralProjectId)), abi.encode(address(0)));
+        hook.claimAndPush({
+            originChainId: 10, referralProjectId: referralProjectId, sucker: sucker, claimData: claimData
+        });
+
+        // Local twin still has no IJBToken — poke must revert.
+        vm.expectRevert(
+            abi.encodeWithSelector(JBReferralSplitHook.JBReferralSplitHook_StillStranded.selector, referralProjectId)
+        );
+        hook.pokeDeferredClaim({sucker: sucker, terminalToken: terminalToken, leafIndex: leafIndex});
+    }
+
+    function test_pokeDeferredClaim_revertsWhenNothingParked() public {
+        // Empty key — never parked.
+        IJBSucker sucker = IJBSucker(makeAddr("sucker"));
+        address terminalToken = makeAddr("terminalToken");
+        uint256 leafIndex = 99;
+        bytes32 strandedKey = keccak256(abi.encode(sucker, terminalToken, leafIndex));
+        vm.expectRevert(
+            abi.encodeWithSelector(JBReferralSplitHook.JBReferralSplitHook_NothingParked.selector, strandedKey)
+        );
+        hook.pokeDeferredClaim({sucker: sucker, terminalToken: terminalToken, leafIndex: leafIndex});
+    }
+
+    function test_pokeDeferredClaim_revertsOnReplay() public {
+        // Park, then poke successfully, then poke again — second poke must revert NothingParked because
+        // the mapping was cleared.
+        IJBSucker sucker = IJBSucker(makeAddr("sucker"));
+        address terminalToken = makeAddr("terminalToken");
+        uint256 leafIndex = 13;
+        uint256 referralProjectId = 42;
+        uint256 projectTokenCount = 200;
+        address feeERC20 = makeAddr("feeERC20");
+        address refERC20 = makeAddr("refERC20");
+
+        vm.mockCall(
+            suckerRegistry,
+            abi.encodeCall(IJBSuckerRegistry.isSuckerOf, (FEE_PROJECT_ID, address(sucker))),
+            abi.encode(true)
+        );
+
+        bytes32[32] memory proof;
+        JBClaim memory claimData = JBClaim({
+            token: terminalToken,
+            leaf: JBLeaf({
+                index: leafIndex,
+                beneficiary: bytes32(uint256(uint160(address(hook)))),
+                projectTokenCount: projectTokenCount,
+                terminalTokenAmount: 50,
+                metadata: hook.packLeafMetadata({originChainId: 10, referralProjectId: referralProjectId})
+            }),
+            proof: proof
+        });
+        bytes32 storedHash = keccak256(
+            abi.encodePacked(
+                claimData.leaf.projectTokenCount,
+                claimData.leaf.terminalTokenAmount,
+                claimData.leaf.beneficiary,
+                claimData.leaf.metadata
+            )
+        );
+        vm.mockCall(
+            address(sucker),
+            abi.encodeCall(IJBSucker.executedLeafHashOf, (terminalToken, leafIndex)),
+            abi.encode(storedHash)
+        );
+        vm.mockCall(tokens, abi.encodeCall(IJBTokens.tokenOf, (FEE_PROJECT_ID)), abi.encode(feeERC20));
+        vm.mockCall(tokens, abi.encodeCall(IJBTokens.tokenOf, (referralProjectId)), abi.encode(address(0)));
+        hook.claimAndPush({
+            originChainId: 10, referralProjectId: referralProjectId, sucker: sucker, claimData: claimData
+        });
+
+        // Tokenize and poke once.
+        vm.mockCall(tokens, abi.encodeCall(IJBTokens.tokenOf, (referralProjectId)), abi.encode(refERC20));
+        vm.mockCall(feeERC20, abi.encodeWithSignature("approve(address,uint256)"), abi.encode(true));
+        vm.mockCall(
+            feeERC20,
+            abi.encodeWithSignature("allowance(address,address)", address(hook), distributor),
+            abi.encode(uint256(0))
+        );
+        vm.mockCall(
+            distributor, abi.encodeCall(IJBDistributor.fund, (refERC20, IERC20(feeERC20), projectTokenCount)), ""
+        );
+        hook.pokeDeferredClaim({sucker: sucker, terminalToken: terminalToken, leafIndex: leafIndex});
+
+        // Second poke must revert.
+        bytes32 strandedKey = keccak256(abi.encode(sucker, terminalToken, leafIndex));
+        vm.expectRevert(
+            abi.encodeWithSelector(JBReferralSplitHook.JBReferralSplitHook_NothingParked.selector, strandedKey)
+        );
+        hook.pokeDeferredClaim({sucker: sucker, terminalToken: terminalToken, leafIndex: leafIndex});
     }
 
     function test_claimAndPush_frontRunHashMismatch_reverts() public {

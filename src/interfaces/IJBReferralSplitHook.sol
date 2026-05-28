@@ -56,15 +56,13 @@ interface IJBReferralSplitHook is IJBSplitHook {
         address caller
     );
 
-    /// @notice Emitted when a bridged claim lands but the local twin has no `IJBToken`, so the
-    /// freshly-minted fee-project tokens are burned rather than stranded in the hook. The bridged terminal
-    /// tokens were already deposited to the fee project's balance by the sucker, so burning the
-    /// freshly-minted supply preserves all existing fee-token holders' pro-rata claim on that
-    /// newly-arrived value.
+    /// @notice DEPRECATED. Retained in the interface ABI so historical event logs from prior deployments
+    /// remain decodable. Current code emits `ParkedOnStrand` instead — the freshly-minted fee-project
+    /// tokens are parked in the hook pending `pokeDeferredClaim`, not burned. Will be removed in a future
+    /// major release once indexers have migrated.
     /// @param originChainId The chain the credit was originally earned on.
     /// @param referralProjectId The local twin's project ID on this chain (had no IJBToken).
-    /// @param feeProjectBurned The number of fee-project tokens burned (== the amount that would have been
-    /// pushed to the distributor had a local twin existed).
+    /// @param feeProjectBurned The number of fee-project tokens that would have been burned.
     /// @param caller The address that settled the bridged claim.
     event BurnedOnStrand(
         uint256 indexed originChainId, uint256 indexed referralProjectId, uint256 feeProjectBurned, address caller
@@ -139,6 +137,37 @@ interface IJBReferralSplitHook is IJBSplitHook {
         address caller
     );
 
+    /// @notice Emitted when a bridged claim lands but the local twin has no `IJBToken`, so the
+    /// freshly-minted fee-project tokens are parked in this hook keyed by leaf identity. The parked
+    /// amount can later be released to the local distributor via `pokeDeferredClaim` once the referrer
+    /// tokenizes.
+    /// @param originChainId The chain the credit was originally earned on.
+    /// @param referralProjectId The local twin's project ID on this chain (had no `IJBToken` at claim time).
+    /// @param sucker The fee project's sucker pair the claim came from. Used as part of the park key.
+    /// @param terminalToken The terminal token of the bridged leaf. Used as part of the park key.
+    /// @param leafIndex The leaf index in the sucker's inbox tree. Used as part of the park key.
+    /// @param feeProjectParked The number of fee-project tokens parked in the hook pending tokenization.
+    /// @param caller The address that triggered the deferred-claim park.
+    event ParkedOnStrand(
+        uint256 indexed originChainId,
+        uint256 indexed referralProjectId,
+        IJBSucker sucker,
+        address terminalToken,
+        uint256 leafIndex,
+        uint256 feeProjectParked,
+        address caller
+    );
+
+    /// @notice Emitted when `pokeDeferredClaim` successfully releases a parked deferred-claim amount to the
+    /// local distributor — typically after the referrer's `IJBToken` was finally deployed.
+    /// @param strandedKey The `keccak256(abi.encode(sucker, terminalToken, leafIndex))` that keyed the park.
+    /// @param referralProjectId The local twin's project ID on this chain (now has an `IJBToken`).
+    /// @param amount The number of fee-project tokens released to the local distributor.
+    /// @param caller The address that triggered the deferred-claim release.
+    event PokedDeferredClaim(
+        bytes32 indexed strandedKey, uint256 indexed referralProjectId, uint256 amount, address caller
+    );
+
     /// @notice Emitted when `pushTo` or `bridgeRemote` no-ops for an observable reason.
     /// @param referralChainId The referrer's home chain ID.
     /// @param referralProjectId The referring project whose action was skipped.
@@ -202,6 +231,22 @@ interface IJBReferralSplitHook is IJBSplitHook {
     /// @param localReferralProjectId The referring project's projectId on `block.chainid`.
     /// @return The cumulative amount pushed locally for this projectId.
     function pushedLocallyOf(uint256 localReferralProjectId) external view returns (uint256);
+
+    /// @notice The fee-project token amount parked in this hook by `claimAndPush` when the local twin had
+    /// no `IJBToken` at claim time, keyed by leaf identity.
+    /// @dev Keyed by `keccak256(abi.encode(sucker, terminalToken, leafIndex))`. Non-zero iff the leaf was
+    /// settled while the local twin's `TOKENS.tokenOf(referralProjectId) == address(0)`. The amount is
+    /// released to the local distributor by `pokeDeferredClaim` once the referrer tokenizes.
+    /// @param strandedKey The `keccak256(abi.encode(sucker, terminalToken, leafIndex))` lookup key.
+    /// @return The parked fee-project token amount (0 if nothing is parked).
+    function parkedAmountOf(bytes32 strandedKey) external view returns (uint256);
+
+    /// @notice The local-twin `referralProjectId` associated with a parked leaf, so `pokeDeferredClaim` can
+    /// re-derive the destination without trusting calldata.
+    /// @dev Mirrors `parkedAmountOf` 1:1.
+    /// @param strandedKey The `keccak256(abi.encode(sucker, terminalToken, leafIndex))` lookup key.
+    /// @return The referral project ID parked alongside `parkedAmountOf[strandedKey]`.
+    function parkedReferralProjectIdOf(bytes32 strandedKey) external view returns (uint256);
 
     /// @notice Whether this hook has already settled the leaf at `(sucker, terminalToken, leafIndex)`.
     /// @dev Set inside `claimAndPush` after the leaf's tokens have been processed (either via the normal
@@ -286,10 +331,11 @@ interface IJBReferralSplitHook is IJBSplitHook {
     /// ordering). Then it calls `sucker.claim`, which deposits the bridged terminal tokens into the
     /// destination fee project's terminal AND mints destination fee-project tokens directly to this hook
     /// (the leaf's `beneficiary`). The hook measures the fee-project-token balance delta and forwards it
-    /// to the local distributor for `referralProjectId`'s local twin. Skips (without reverting) when the
-    /// local twin has no `IJBToken` yet — the unforwarded fee-project tokens stay in this hook's balance;
-    /// no `pushedOf` accounting on the destination side because the source chain's `bridgeRemote` already
-    /// advanced its high-water mark.
+    /// to the local distributor for `referralProjectId`'s local twin. When the local twin has no
+    /// `IJBToken` yet, the freshly-minted fee-project tokens are PARKED in the hook keyed by
+    /// `(sucker, terminalToken, leafIndex)` — anyone can later call `pokeDeferredClaim` to release them
+    /// once the referrer tokenizes. No `pushedOf` accounting on the destination side because the source
+    /// chain's `bridgeRemote` already advanced its high-water mark.
     /// @param originChainId The chain the credit was originally earned on.
     /// @param referralProjectId The local twin's project ID on this chain.
     /// @param sucker The fee project's sucker pair the claim belongs to.
@@ -300,6 +346,26 @@ interface IJBReferralSplitHook is IJBSplitHook {
         uint256 referralProjectId,
         IJBSucker sucker,
         JBClaim calldata claimData
+    )
+        external
+        returns (uint256 pushed);
+
+    /// @notice Release a parked deferred-claim amount to the local distributor once the referral project's
+    /// `IJBToken` has been deployed on this chain.
+    /// @dev Permissionless. Looks up `parkedAmountOf[keccak256(abi.encode(sucker, terminalToken, leafIndex))]`,
+    /// re-derives the referral project ID from `parkedReferralProjectIdOf` (so the caller can't redirect the
+    /// release), resolves the referrer's `IJBToken`, and forwards the parked amount to the distributor. Clears
+    /// the park BEFORE the external call so reentrancy in the distributor cannot double-spend the parked slot.
+    /// Reverts with `NothingParked` when there's nothing to release, and with `StillStranded` when the
+    /// referrer still has no `IJBToken`.
+    /// @param sucker The fee project's sucker pair that produced the original parked leaf.
+    /// @param terminalToken The terminal token of the original parked leaf.
+    /// @param leafIndex The leaf index of the original parked leaf in the sucker's inbox tree.
+    /// @return pushed The number of fee-project tokens released to the local distributor.
+    function pokeDeferredClaim(
+        IJBSucker sucker,
+        address terminalToken,
+        uint256 leafIndex
     )
         external
         returns (uint256 pushed);

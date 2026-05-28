@@ -73,6 +73,11 @@ contract JBReferralSplitHook is ERC165, IJBReferralSplitHook {
     /// remote chain (or anywhere at all).
     error JBReferralSplitHook_NotASucker(address sucker);
 
+    /// @notice `pokeDeferredClaim` rejected because no parked amount exists at the supplied key — either
+    /// nothing was ever parked for this `(sucker, terminalToken, leafIndex)`, or a prior `pokeDeferredClaim`
+    /// already cleared it.
+    error JBReferralSplitHook_NothingParked(bytes32 strandedKey);
+
     /// @notice `claimAndPush` rejected because the leaf's `originChainId` equals `block.chainid`. Bridged
     /// claims must come from a different chain; same-chain settlement happens via `pushTo`.
     error JBReferralSplitHook_OriginIsLocal(uint256 chainId);
@@ -80,6 +85,11 @@ contract JBReferralSplitHook is ERC165, IJBReferralSplitHook {
     /// @notice `packLeafMetadata` rejected a `referralProjectId` larger than `type(uint64).max` so the high
     /// bits of the packed metadata can never silently bleed into the reserved upper region.
     error JBReferralSplitHook_ReferralProjectIdTooLarge(uint256 referralProjectId);
+
+    /// @notice `pokeDeferredClaim` rejected because the referral project still has no `IJBToken` on this
+    /// chain. The parked fee-project tokens remain claimable; the caller can retry once the referrer
+    /// tokenizes via `JBController.deployERC20For`.
+    error JBReferralSplitHook_StillStranded(uint256 referralProjectId);
 
     /// @notice `burnUnbridgeableCreditFor` rejected because a sucker (active OR deprecated) DOES exist for
     /// the asserted chain — the credit is bridgeable, not stranded, so the caller must use `bridgeRemote`
@@ -151,6 +161,17 @@ contract JBReferralSplitHook is ERC165, IJBReferralSplitHook {
     /// projectId *on `referralChainId`* — projectId spaces are independent per chain, so the same numeric
     /// projectId on two different chains represents two different projects and gets two independent budgets.
     mapping(uint256 referralChainId => mapping(uint256 referralProjectId => uint256)) public override bridgedOutOf;
+
+    /// @inheritdoc IJBReferralSplitHook
+    /// @dev Keyed by `keccak256(abi.encode(sucker, terminalToken, leafIndex))`. Non-zero iff the leaf was
+    /// claimed when the local twin had no `IJBToken`; the freshly-minted fee-project tokens are parked here
+    /// until `pokeDeferredClaim` is called after the referrer tokenizes.
+    mapping(bytes32 strandedKey => uint256 amount) public override parkedAmountOf;
+
+    /// @inheritdoc IJBReferralSplitHook
+    /// @dev Mirrors `parkedAmountOf` so the poker can re-derive `referralProjectId` without trusting
+    /// calldata.
+    mapping(bytes32 strandedKey => uint256 referralProjectId) public override parkedReferralProjectIdOf;
 
     /// @inheritdoc IJBReferralSplitHook
     /// @dev Keyed by the referrer's projectId on `block.chainid`. The local high-water mark for same-chain
@@ -476,10 +497,12 @@ contract JBReferralSplitHook is ERC165, IJBReferralSplitHook {
     /// this side, `terminalTokenAmount` is deposited back into the fee project's surplus AND N fee-project
     /// tokens are minted to this hook. Net per-token claim on surplus is unchanged; the referrer receives
     /// fee-project tokens (not raw terminal tokens) but the underlying economic value matches.
-    /// @dev BURN-ON-STRAND: if the local twin's `TOKENS.tokenOf(referralProjectId) == address(0)` (no ERC-20
-    /// minted yet), the freshly-minted fee-project tokens are burned rather than left in the hook. The leaf
-    /// is single-use and is now consumed; holding the supply would permanently dilute existing holders for
-    /// no recipient.
+    /// @dev PARK-ON-STRAND: if the local twin's `TOKENS.tokenOf(referralProjectId) == address(0)` (no
+    /// ERC-20 minted yet), the freshly-minted fee-project tokens are PARKED in this hook keyed by
+    /// `(sucker, terminalToken, leafIndex)`. The leaf is single-use, but the credit is recoverable: anyone
+    /// can later call `pokeDeferredClaim(sucker, terminalToken, leafIndex)` to release the parked amount to
+    /// the local distributor once the referrer tokenizes via `JBController.deployERC20For`. This is the
+    /// cross-chain analog of `pushTo`'s "no token" deferral — the leaf cannot be retried, but the value can.
     /// @dev No `bridgedOutOf` / `pushedLocallyOf` write here — both ledgers track the *source* side of work
     /// this hook initiated, not destinations of bridges initiated by other chains' hooks.
     /// @param originChainId The chain the credit was originally earned on. Must NOT equal `block.chainid`.
@@ -598,23 +621,26 @@ contract JBReferralSplitHook is ERC165, IJBReferralSplitHook {
         // per-chain).
         IJBToken refToken = TOKENS.tokenOf(referralProjectId);
         if (address(refToken) == address(0)) {
-            // BURN-OVER-STRAND: the sucker's `_handleClaim` already deposited the bridged terminal tokens
+            // PARK-ON-STRAND: the sucker's `_handleClaim` already deposited the bridged terminal tokens
             // into the fee project's balance AND minted us fee-project tokens. The leaf is now consumed
             // (executed-bitmap set on the sucker), so there's no future settlement that can use these
-            // freshly-minted tokens. Holding them in this hook would strand value indefinitely. Burning
-            // them here keeps the bridged terminal-token value intact in the fee project's balance but
-            // returns the offsetting supply to zero, so every existing fee-project token holder's pro-rata
-            // claim on the new surplus grows. `holder == msg.sender == address(this)` so JBController's
-            // permission check passes automatically.
+            // freshly-minted tokens via `claimAndPush` again. But the credit IS recoverable: park the
+            // minted amount keyed by leaf identity, and let anyone call `pokeDeferredClaim` to release it
+            // to the local distributor once the referrer tokenizes via `JBController.deployERC20For`. We
+            // re-derive `referralProjectId` from storage in `pokeDeferredClaim`, so the caller of the
+            // release cannot redirect the parked tokens to a different project. This is the cross-chain
+            // analog of `pushTo`'s "no token" deferral: the leaf cannot be retried, but the value can.
             if (feeProjectMinted != 0) {
-                IJBController(address(DIRECTORY.controllerOf(FEE_PROJECT_ID)))
-                    .burnTokensOf({
-                    holder: address(this), projectId: FEE_PROJECT_ID, tokenCount: feeProjectMinted, memo: ""
-                });
-                emit BurnedOnStrand({
+                bytes32 strandedKey = keccak256(abi.encode(sucker, claimData.token, claimData.leaf.index));
+                parkedAmountOf[strandedKey] = feeProjectMinted;
+                parkedReferralProjectIdOf[strandedKey] = referralProjectId;
+                emit ParkedOnStrand({
                     originChainId: originChainId,
                     referralProjectId: referralProjectId,
-                    feeProjectBurned: feeProjectMinted,
+                    sucker: sucker,
+                    terminalToken: claimData.token,
+                    leafIndex: claimData.leaf.index,
+                    feeProjectParked: feeProjectMinted,
                     caller: msg.sender
                 });
             } else {
@@ -650,6 +676,40 @@ contract JBReferralSplitHook is ERC165, IJBReferralSplitHook {
             feeProjectMinted: feeProjectMinted,
             pushed: pushed,
             caller: msg.sender
+        });
+    }
+
+    /// @inheritdoc IJBReferralSplitHook
+    function pokeDeferredClaim(
+        IJBSucker sucker,
+        address terminalToken,
+        uint256 leafIndex
+    )
+        external
+        override
+        returns (uint256 pushed)
+    {
+        bytes32 strandedKey = keccak256(abi.encode(sucker, terminalToken, leafIndex));
+        uint256 amount = parkedAmountOf[strandedKey];
+        if (amount == 0) revert JBReferralSplitHook_NothingParked(strandedKey);
+
+        // Re-derive the referrer from storage rather than trusting the caller — the only legitimate
+        // destination for a parked amount is the project it was originally parked for, and `claimAndPush`
+        // wrote that pairing under the merkle proof's authentication.
+        uint256 referralProjectId = parkedReferralProjectIdOf[strandedKey];
+        IJBToken refToken = TOKENS.tokenOf(referralProjectId);
+        if (address(refToken) == address(0)) revert JBReferralSplitHook_StillStranded(referralProjectId);
+
+        // Clear BEFORE the external call. Reentrancy via the distributor or the referrer's IJBToken can't
+        // double-spend the parked slot — the lookup returns 0 on re-entry and `NothingParked` fires.
+        delete parkedAmountOf[strandedKey];
+        delete parkedReferralProjectIdOf[strandedKey];
+
+        pushed = amount;
+        _fundDistributor({referralToken: refToken, amount: pushed});
+
+        emit PokedDeferredClaim({
+            strandedKey: strandedKey, referralProjectId: referralProjectId, amount: pushed, caller: msg.sender
         });
     }
 

@@ -12,7 +12,8 @@ JBMultiTerminal      ── fee in ─►  JBTerminalStore (normalized to NATIVE
 JBController         ── reserved tokens ─►  JBReferralSplitHook
                                               ├─ pushTo (same-chain) ───────────►  JBTokenDistributor.fund
                                               ├─ bridgeRemote (cross-chain) ────►  JBSucker.prepare → outbox leaf
-                                              ├─ claimAndPush (cross-chain in) ─►  JBSucker.claim → mintTokensOf + addToBalance, then forward OR burn
+                                              ├─ claimAndPush (cross-chain in) ─►  JBSucker.claim → mintTokensOf + addToBalance, then forward OR park (pending tokenization)
+                                              ├─ pokeDeferredClaim ─────────────►  JBTokenDistributor.fund (release a parked deferred claim)
                                               └─ burnUnbridgeableCreditFor ─────►  JBController.burnTokensOf (no sucker for chain)
 ```
 
@@ -108,8 +109,20 @@ anyone calls JBReferralSplitHook.claimAndPush(originChainId, refProjectId, sucke
        -> sucker validates merkle proof, sets executed bitmap, mints fee-project tokens to self, addToBalance for terminal tokens
   -> feeProjectMinted = balanceAfter - balanceBefore
   -> resolve refProjectId's IJBToken on this chain
-  -> if no token: burnTokensOf(self, FEE_PROJECT_ID, feeProjectMinted) — bridged terminal-token value becomes pro-rata surplus
+  -> if no token: park feeProjectMinted under keccak256(abi.encode(sucker, terminalToken, leafIndex)); emit ParkedOnStrand (anyone can release later via pokeDeferredClaim)
   -> else: forceApprove(distributor, feeProjectMinted); DISTRIBUTOR.fund(refToken, feeToken, feeProjectMinted); emit ClaimedRemote
+```
+
+### Poke Deferred Claim (pokeDeferredClaim)
+
+```text
+anyone calls JBReferralSplitHook.pokeDeferredClaim(sucker, terminalToken, leafIndex)
+  -> strandedKey = keccak256(abi.encode(sucker, terminalToken, leafIndex))
+  -> amount = parkedAmountOf[strandedKey] (revert NothingParked if zero)
+  -> refProjectId = parkedReferralProjectIdOf[strandedKey]
+  -> resolve refProjectId's IJBToken on this chain (revert StillStranded if address(0))
+  -> delete parkedAmountOf[strandedKey]; delete parkedReferralProjectIdOf[strandedKey] (clear-before-call)
+  -> forceApprove(distributor, amount); DISTRIBUTOR.fund(refToken, feeToken, amount); emit PokedDeferredClaim
 ```
 
 ### Burn Unbridgeable Credit (burnUnbridgeableCreditFor)
