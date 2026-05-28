@@ -54,7 +54,7 @@ This repo routes the fee project's reserved-token allocation to active referrers
 
 **Preconditions**
 - The fee project's reserved tokens have been distributed at least once (`totalDeposited > 0`)
-- The operator can read `feeVolumeByReferralOf` and `suckersOf(FEE_PROJECT_ID)` to plan routing
+- The operator can read `feeVolumeByReferralOf` and `allSuckersOf(FEE_PROJECT_ID)` to plan routing
 
 **Main Flow**
 1. Index `JBTerminalStore.ReferralCredit(terminal, chainId, refId, amount, newTotal)` events to identify active referrers.
@@ -149,7 +149,7 @@ This repo routes the fee project's reserved-token allocation to active referrers
 
 - The hook trusts `JBDirectory.controllerOf(FEE_PROJECT_ID)` to gate `processSplitWith`.
 - The hook trusts `JBTerminalStore` to publish a coherent, currency-normalized volume ledger.
-- The hook trusts `JBSuckerRegistry.suckersOf` + each sucker's `peerChainId()` to identify destinations.
+- The hook trusts `JBSuckerRegistry.isSuckerOf` / `allSuckersOf` + each sucker's `peerChainId()` to identify destinations.
 - The hook trusts the sucker's merkle proof + the leaf's `metadata` payload to authenticate cross-chain claims.
 - The hook trusts the destination-side `TOKENS.tokenOf(refProjectId)` to either be a real IVotes ERC-20 or `address(0)`.
 

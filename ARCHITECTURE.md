@@ -39,7 +39,7 @@ The hook owns no economic policy. The volume ratio comes from `JBTerminalStore`;
 - The hook trusts `JBTerminalStore` as a volume oracle. `totalFeeVolumeOf` and `feeVolumeByReferralOf` are read-only inputs; if upstream diverges from reality (e.g., a terminal write bug), the hook over- or under-distributes.
 - The hook trusts `JBDirectory.controllerOf(FEE_PROJECT_ID)` to identify the legal caller of `processSplitWith`.
 - The hook trusts `JBTokens.tokenOf(...)` to return the correct IVotes ERC-20 for any project — or `address(0)` for un-tokenized projects.
-- The hook trusts `JBSuckerRegistry.suckersOf(FEE_PROJECT_ID)` and each sucker's `peerChainId()` for cross-chain routing decisions.
+- The hook trusts `JBSuckerRegistry.isSuckerOf` / `allSuckersOf(FEE_PROJECT_ID)` and each sucker's `peerChainId()` for cross-chain routing decisions.
 - The hook trusts the sucker's merkle proof + `metadata` field to authenticate cross-chain claims. Forging a leaf is the sucker's problem, not the hook's.
 - The hook does NOT trust the caller of any settle-side entrypoint (`pushTo`, `bridgeRemote`, `claimAndPush`, `burnUnbridgeableCreditFor`). All four are permissionless.
 
@@ -118,7 +118,7 @@ anyone calls JBReferralSplitHook.claimAndPush(originChainId, refProjectId, sucke
 anyone calls JBReferralSplitHook.burnUnbridgeableCreditFor(remoteChainId, refProjectId)
   -> reject if refProjectId == 0 || refProjectId == FEE_PROJECT_ID
   -> reject if remoteChainId == 0 || remoteChainId == block.chainid
-  -> iterate SUCKER_REGISTRY.suckersOf(FEE_PROJECT_ID)
+  -> iterate SUCKER_REGISTRY.allSuckersOf(FEE_PROJECT_ID)  // includes DEPRECATED — they still settle pending claims
        -> if any peerChainId() == remoteChainId: revert SuckerExistsForChain (must use bridgeRemote)
   -> compute delta = entitled - bridgedOutOf[remoteChainId][refProjectId]
   -> advance bridgedOutOf (shared HWM with bridgeRemote)

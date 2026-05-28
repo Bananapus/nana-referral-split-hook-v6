@@ -61,12 +61,12 @@ contract JBReferralSplitHookTest is Test {
     }
 
     function test_pushTo_revertsOnZeroReferralProjectId() public {
-        vm.expectRevert(IJBReferralSplitHook.JBReferralSplitHook_InvalidReferralProjectId.selector);
+        vm.expectRevert(JBReferralSplitHook.JBReferralSplitHook_InvalidReferralProjectId.selector);
         hook.pushTo({referralChainId: block.chainid, referralProjectId: 0});
     }
 
     function test_pushTo_revertsOnFeeProjectIdSelfReference() public {
-        vm.expectRevert(IJBReferralSplitHook.JBReferralSplitHook_InvalidReferralProjectId.selector);
+        vm.expectRevert(JBReferralSplitHook.JBReferralSplitHook_InvalidReferralProjectId.selector);
         hook.pushTo({referralChainId: block.chainid, referralProjectId: FEE_PROJECT_ID});
     }
 
@@ -90,7 +90,7 @@ contract JBReferralSplitHookTest is Test {
         // Bridging to the current chain would mean using a sucker for a same-chain settlement, which is wrong.
         vm.expectRevert(
             abi.encodeWithSelector(
-                IJBReferralSplitHook.JBReferralSplitHook_WrongBridgeTarget.selector, block.chainid, block.chainid
+                JBReferralSplitHook.JBReferralSplitHook_WrongBridgeTarget.selector, block.chainid, block.chainid
             )
         );
         hook.bridgeRemote({
@@ -103,7 +103,7 @@ contract JBReferralSplitHookTest is Test {
     }
 
     function test_bridgeRemote_revertsOnZeroOrFeeProjectId() public {
-        vm.expectRevert(IJBReferralSplitHook.JBReferralSplitHook_InvalidReferralProjectId.selector);
+        vm.expectRevert(JBReferralSplitHook.JBReferralSplitHook_InvalidReferralProjectId.selector);
         hook.bridgeRemote({
             referralChainId: block.chainid + 1,
             referralProjectId: 0,
@@ -112,7 +112,7 @@ contract JBReferralSplitHookTest is Test {
             minTokensReclaimed: 0
         });
 
-        vm.expectRevert(IJBReferralSplitHook.JBReferralSplitHook_InvalidReferralProjectId.selector);
+        vm.expectRevert(JBReferralSplitHook.JBReferralSplitHook_InvalidReferralProjectId.selector);
         hook.bridgeRemote({
             referralChainId: block.chainid + 1,
             referralProjectId: FEE_PROJECT_ID,
@@ -131,7 +131,7 @@ contract JBReferralSplitHookTest is Test {
         );
 
         vm.expectRevert(
-            abi.encodeWithSelector(IJBReferralSplitHook.JBReferralSplitHook_NotASucker.selector, address(sucker))
+            abi.encodeWithSelector(JBReferralSplitHook.JBReferralSplitHook_NotASucker.selector, address(sucker))
         );
         hook.bridgeRemote({
             referralChainId: block.chainid + 1,
@@ -164,7 +164,7 @@ contract JBReferralSplitHookTest is Test {
         });
 
         vm.expectRevert(
-            abi.encodeWithSelector(IJBReferralSplitHook.JBReferralSplitHook_NotASucker.selector, address(sucker))
+            abi.encodeWithSelector(JBReferralSplitHook.JBReferralSplitHook_NotASucker.selector, address(sucker))
         );
         hook.claimAndPush({originChainId: 1, referralProjectId: 42, sucker: sucker, claimData: claimData});
     }
@@ -195,7 +195,7 @@ contract JBReferralSplitHookTest is Test {
         bytes32 lyingMetadata = hook.packLeafMetadata({originChainId: 7, referralProjectId: 99});
         vm.expectRevert(
             abi.encodeWithSelector(
-                IJBReferralSplitHook.JBReferralSplitHook_LeafMetadataMismatch.selector, lyingMetadata, honestMetadata
+                JBReferralSplitHook.JBReferralSplitHook_LeafMetadataMismatch.selector, lyingMetadata, honestMetadata
             )
         );
         hook.claimAndPush({originChainId: 7, referralProjectId: 99, sucker: sucker, claimData: claimData});
@@ -220,7 +220,7 @@ contract JBReferralSplitHookTest is Test {
         });
 
         vm.expectRevert(
-            abi.encodeWithSelector(IJBReferralSplitHook.JBReferralSplitHook_OriginIsLocal.selector, block.chainid)
+            abi.encodeWithSelector(JBReferralSplitHook.JBReferralSplitHook_OriginIsLocal.selector, block.chainid)
         );
         hook.claimAndPush({originChainId: block.chainid, referralProjectId: 42, sucker: sucker, claimData: claimData});
     }
@@ -243,7 +243,7 @@ contract JBReferralSplitHookTest is Test {
 
         vm.expectRevert(
             abi.encodeWithSelector(
-                IJBReferralSplitHook.JBReferralSplitHook_SuckerPeerMismatch.selector, referrerChain, suckerPeerChain
+                JBReferralSplitHook.JBReferralSplitHook_SuckerPeerMismatch.selector, referrerChain, suckerPeerChain
             )
         );
         hook.bridgeRemote({
@@ -270,7 +270,7 @@ contract JBReferralSplitHookTest is Test {
     function test_packLeafMetadata_revertsOnChainIdOverflow() public {
         uint256 oversized = uint256(type(uint32).max) + 1;
         vm.expectRevert(
-            abi.encodeWithSelector(IJBReferralSplitHook.JBReferralSplitHook_ChainIdTooLarge.selector, oversized)
+            abi.encodeWithSelector(JBReferralSplitHook.JBReferralSplitHook_ChainIdTooLarge.selector, oversized)
         );
         hook.packLeafMetadata({originChainId: oversized, referralProjectId: 1});
     }
@@ -279,7 +279,7 @@ contract JBReferralSplitHookTest is Test {
         uint256 oversized = uint256(type(uint64).max) + 1;
         vm.expectRevert(
             abi.encodeWithSelector(
-                IJBReferralSplitHook.JBReferralSplitHook_ReferralProjectIdTooLarge.selector, oversized
+                JBReferralSplitHook.JBReferralSplitHook_ReferralProjectIdTooLarge.selector, oversized
             )
         );
         hook.packLeafMetadata({originChainId: 1, referralProjectId: oversized});
@@ -300,7 +300,7 @@ contract JBReferralSplitHookTest is Test {
 
         vm.expectRevert(
             abi.encodeWithSelector(
-                IJBReferralSplitHook.JBReferralSplitHook_SuckerNotEnabled.selector,
+                JBReferralSplitHook.JBReferralSplitHook_SuckerNotEnabled.selector,
                 address(sucker),
                 JBSuckerState.DEPRECATED
             )
@@ -325,7 +325,7 @@ contract JBReferralSplitHookTest is Test {
 
         vm.expectRevert(
             abi.encodeWithSelector(
-                IJBReferralSplitHook.JBReferralSplitHook_SuckerNotEnabled.selector,
+                JBReferralSplitHook.JBReferralSplitHook_SuckerNotEnabled.selector,
                 address(sucker),
                 JBSuckerState.SENDING_DISABLED
             )
@@ -400,7 +400,7 @@ contract JBReferralSplitHookTest is Test {
         // Second call with same leaf reverts.
         vm.expectRevert(
             abi.encodeWithSelector(
-                IJBReferralSplitHook.JBReferralSplitHook_LeafAlreadySettled.selector,
+                JBReferralSplitHook.JBReferralSplitHook_LeafAlreadySettled.selector,
                 address(sucker),
                 terminalToken,
                 uint256(7)
@@ -452,7 +452,7 @@ contract JBReferralSplitHookTest is Test {
 
         vm.expectRevert(
             abi.encodeWithSelector(
-                IJBReferralSplitHook.JBReferralSplitHook_FrontRunLeafMismatch.selector, fakeLeafHash, realLeafHash
+                JBReferralSplitHook.JBReferralSplitHook_FrontRunLeafMismatch.selector, fakeLeafHash, realLeafHash
             )
         );
         hook.claimAndPush({originChainId: 10, referralProjectId: 99, sucker: sucker, claimData: fakeClaim});
@@ -475,7 +475,7 @@ contract JBReferralSplitHookTest is Test {
 
         vm.expectRevert(
             abi.encodeWithSelector(
-                IJBReferralSplitHook.JBReferralSplitHook_SuckerExistsForChain.selector, depSucker, uint256(11)
+                JBReferralSplitHook.JBReferralSplitHook_SuckerExistsForChain.selector, depSucker, uint256(11)
             )
         );
         hook.burnUnbridgeableCreditFor({referralChainId: 11, referralProjectId: 42});
