@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.0.9
+
+Bump `@bananapus/distributor-v6` `^0.0.32` → `^0.0.35`.
+
+The hook's only distributor integration is `DISTRIBUTOR.fund(hook, token, amount)` (`_fundDistributor` forwards each
+referrer's accrued fee-project-token share, keyed on the referrer's IVotes token). That signature and its
+balance-delta ERC-20 pull semantics are unchanged in 0.0.35, so the integration is compatible with no code change —
+verified by building and running the suite against 0.0.35. Note: the distributor's `IJBDistributor` interface now
+transitively pulls in `@rev-net/core-v6` (plus buyback-hook and croptop) for its vesting/loan surface, so this bump
+enlarges the hook's build dependency tree even though it only calls `fund`.
+
 ## 0.0.4
 
 Cross-chain settlement, burn-over-strand policy, defense-in-depth validation. Breaking ABI (new entrypoints, new errors, new events; rewritten `claimAndPush` semantics on the missing-twin path).
